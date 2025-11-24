@@ -1,0 +1,30 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[packages]
+numpy = "*"
+pandas = "==2.2.2"
+torch = "*"
+einops = "==0.8.1"
+huggingface_hub = "==0.33.1"
+matplotlib = "==3.9.3"
+tqdm = "==4.67.1"
+safetensors = "==0.6.2"
+flask = "*"
+flask-cors = "*"
+nixtla = "*"
+python-dotenv = "*"
+yfinance = "*"
+
+[dev-packages]
+flake8 = "*"
+pytest-cov = "*"
+ipykernel = "*"
+pre-commit = "*"
+ipywidgets = "*"
+plotly = "*"
+
+[requires]
+python_version = "3.12"

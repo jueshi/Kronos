@@ -9,10 +9,12 @@ from flask_cors import CORS
 import sys
 import warnings
 import datetime
+from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
 
 # Add project root directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv()
 
 try:
     from model import Kronos, KronosTokenizer, KronosPredictor
@@ -28,6 +30,18 @@ CORS(app)
 tokenizer = None
 model = None
 predictor = None
+TIMEGPT_AVAILABLE = False
+try:
+    from nixtla import NixtlaClient
+    api_key_env = os.environ.get('NIXTLA_API_KEY')
+    if api_key_env:
+        try:
+            client = NixtlaClient(api_key=api_key_env)
+            TIMEGPT_AVAILABLE = bool(getattr(client, 'validate_api_key', lambda: True)())
+        except Exception:
+            TIMEGPT_AVAILABLE = False
+except Exception:
+    TIMEGPT_AVAILABLE = False
 
 # Available model configurations
 AVAILABLE_MODELS = {
@@ -258,7 +272,7 @@ def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, his
             high=pred_df['high'],
             low=pred_df['low'],
             close=pred_df['close'],
-            name='Prediction Data (120 data points)',
+            name='Prediction Data',
             increasing_line_color='#66BB6A',
             decreasing_line_color='#FF7043'
         ))
@@ -291,7 +305,7 @@ def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, his
             high=actual_df['high'],
             low=actual_df['low'],
             close=actual_df['close'],
-            name='Actual Data (120 data points)',
+            name='Actual Data',
             increasing_line_color='#FF9800',
             decreasing_line_color='#F44336'
         ))
@@ -326,6 +340,52 @@ def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, his
             )
     
     return json.dumps(fig, cls=plotly.utils.PlotlyJSONEncoder)
+
+def _infer_freq(df):
+    if 'timestamps' in df.columns and len(df) > 1:
+        try:
+            deltas = df['timestamps'].sort_values().diff().dropna()
+            if len(deltas) == 0:
+                return None
+            d = deltas.iloc[0]
+            secs = int(d.total_seconds())
+            if secs <= 0:
+                return None
+            if secs % 86400 == 0:
+                return f"{secs // 86400}D"
+            if secs % 3600 == 0:
+                return f"{secs // 3600}H"
+            if secs % 60 == 0:
+                return f"{secs // 60}T"
+            return f"{secs}S"
+        except Exception:
+            return None
+    return None
+
+def _timegpt_forecast_close(hist_df, h):
+    if not TIMEGPT_AVAILABLE:
+        return None
+    # Ensure timestamps are datetime
+    try:
+        hist_df = hist_df.copy()
+        hist_df['timestamps'] = pd.to_datetime(hist_df['timestamps'])
+    except Exception:
+        pass
+    freq = _infer_freq(hist_df)
+    try:
+        base_url = os.environ.get('NIXTLA_BASE_URL')
+        api_key = os.environ.get('NIXTLA_API_KEY')
+        client = NixtlaClient(api_key=api_key, base_url=base_url) if base_url else NixtlaClient(api_key=api_key)
+        df_ = hist_df[['timestamps','close']].rename(columns={'close':'value'})
+        df_ = df_.sort_values('timestamps')
+        if freq:
+            fcst = client.forecast(df=df_, h=h, time_col='timestamps', target_col='value', freq=freq)
+        else:
+            fcst = client.forecast(df=df_, h=h, time_col='timestamps', target_col='value')
+        return fcst['value'].values.tolist()
+    except Exception as e:
+        print(f"TimeGPT forecast error: {e}")
+        return None
 
 @app.route('/')
 def index():
@@ -437,8 +497,24 @@ def predict():
                 
                 # Process time period selection
                 start_date = data.get('start_date')
+                start_index = data.get('start_index')
                 
-                if start_date:
+                if start_index is not None:
+                    start_index = int(start_index)
+                    if start_index < 0 or start_index + lookback + pred_len > len(df):
+                        return jsonify({'error': f'Invalid start_index, must be between 0 and {max(0, len(df) - (lookback + pred_len))}'}), 400
+                    time_range_df = df.iloc[start_index:start_index+lookback+pred_len]
+                    required_cols = ['open', 'high', 'low', 'close']
+                    if 'volume' in df.columns:
+                        required_cols.append('volume')
+                    x_df = time_range_df.iloc[:lookback][required_cols]
+                    x_timestamp = time_range_df.iloc[:lookback]['timestamps']
+                    y_timestamp = time_range_df.iloc[lookback:lookback+pred_len]['timestamps']
+                    start_timestamp = time_range_df['timestamps'].iloc[0]
+                    end_timestamp = time_range_df['timestamps'].iloc[lookback+pred_len-1]
+                    time_span = end_timestamp - start_timestamp
+                    prediction_type = f"Kronos model prediction (selected window by index: first {lookback} for prediction, last {pred_len} for comparison, time span: {time_span})"
+                elif start_date:
                     # Custom time period - fix logic: use data within selected window
                     start_dt = pd.to_datetime(start_date)
                     
@@ -495,7 +571,23 @@ def predict():
         actual_data = []
         actual_df = None
         
-        if start_date:  # Custom time period
+        if start_index is not None:
+            actual_data = []
+            actual_df = None
+            time_range_df = df.iloc[int(start_index):int(start_index)+lookback+pred_len]
+            if len(time_range_df) >= lookback + pred_len:
+                actual_df = time_range_df.iloc[lookback:lookback+pred_len]
+                for i, (_, row) in enumerate(actual_df.iterrows()):
+                    actual_data.append({
+                        'timestamp': row['timestamps'].isoformat(),
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': float(row['close']),
+                        'volume': float(row['volume']) if 'volume' in row else 0,
+                        'amount': float(row['amount']) if 'amount' in row else 0
+                    })
+        elif start_date:  # Custom time period
             # Fix logic: use data within selected window
             # Prediction uses first 400 data points within selected window
             # Actual data should be last 120 data points within selected window
@@ -536,7 +628,9 @@ def predict():
                     })
         
         # Create chart - pass historical data start position
-        if start_date:
+        if start_index is not None:
+            historical_start_idx = int(start_index)
+        elif start_date:
             # Custom time period: find starting position of historical data in original df
             start_dt = pd.to_datetime(start_date)
             mask = df['timestamps'] >= start_dt
@@ -549,7 +643,19 @@ def predict():
         
         # Prepare prediction result data - fix timestamp calculation logic
         if 'timestamps' in df.columns:
-            if start_date:
+            if start_index is not None:
+                time_range_df = df.iloc[int(start_index):int(start_index)+lookback+pred_len]
+                if len(time_range_df) >= lookback:
+                    last_timestamp = time_range_df['timestamps'].iloc[lookback-1]
+                    time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
+                    future_timestamps = pd.date_range(
+                        start=last_timestamp + time_diff,
+                        periods=pred_len,
+                        freq=time_diff
+                    )
+                else:
+                    future_timestamps = []
+            elif start_date:
                 # Custom time period: use selected window data to calculate timestamps
                 start_dt = pd.to_datetime(start_date)
                 mask = df['timestamps'] >= start_dt
@@ -623,6 +729,229 @@ def predict():
     except Exception as e:
         return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
 
+@app.route('/api/expert-predict', methods=['POST'])
+def expert_predict():
+    try:
+        data = request.get_json()
+        file_path = data.get('file_path')
+        lookback = int(data.get('lookback', 400))
+        pred_len = int(data.get('pred_len', 120))
+        temperature = float(data.get('temperature', 1.0))
+        top_p = float(data.get('top_p', 0.9))
+        sample_count = int(data.get('sample_count', 1))
+        alpha = float(data.get('alpha', 0.5))
+        if not file_path:
+            return jsonify({'error': 'File path cannot be empty'}), 400
+        df, error = load_data_file(file_path)
+        if error:
+            return jsonify({'error': error}), 400
+        if len(df) < lookback + pred_len:
+            return jsonify({'error': f'Insufficient data length, need at least {lookback + pred_len} rows'}), 400
+        start_date = data.get('start_date')
+        start_index = data.get('start_index')
+        required_cols = ['open','high','low','close']
+        if 'volume' in df.columns:
+            required_cols.append('volume')
+        if start_index is not None:
+            start_index = int(start_index)
+            time_range_df = df.iloc[start_index:start_index+lookback+pred_len]
+            x_df = time_range_df.iloc[:lookback][required_cols]
+            x_timestamp = time_range_df.iloc[:lookback]['timestamps']
+            y_timestamp = time_range_df.iloc[lookback:lookback+pred_len]['timestamps']
+            historical_start_idx = int(start_index)
+        elif start_date:
+            start_dt = pd.to_datetime(start_date)
+            mask = df['timestamps'] >= start_dt
+            time_range_df = df[mask]
+            x_df = time_range_df.iloc[:lookback][required_cols]
+            x_timestamp = time_range_df.iloc[:lookback]['timestamps']
+            y_timestamp = time_range_df.iloc[lookback:lookback+pred_len]['timestamps']
+            historical_start_idx = df[mask].index[0] if len(df[mask]) > 0 else 0
+        else:
+            x_df = df.iloc[:lookback][required_cols]
+            x_timestamp = df.iloc[:lookback]['timestamps']
+            y_timestamp = df.iloc[lookback:lookback+pred_len]['timestamps']
+            historical_start_idx = 0
+        kronos_pred_df = None
+        if MODEL_AVAILABLE and predictor is not None:
+            if isinstance(x_timestamp, pd.DatetimeIndex):
+                x_timestamp = pd.Series(x_timestamp, name='timestamps')
+            if isinstance(y_timestamp, pd.DatetimeIndex):
+                y_timestamp = pd.Series(y_timestamp, name='timestamps')
+            kronos_pred_df = predictor.predict(df=x_df, x_timestamp=x_timestamp, y_timestamp=y_timestamp, pred_len=pred_len, T=temperature, top_p=top_p, sample_count=sample_count)
+        hist_close_df = pd.DataFrame({'timestamps': x_timestamp, 'close': x_df['close'].values})
+        timegpt_close = _timegpt_forecast_close(hist_close_df, pred_len)
+        combined_df = None
+        if kronos_pred_df is not None:
+            combined_df = kronos_pred_df.copy()
+            if timegpt_close is not None and len(timegpt_close) >= len(combined_df):
+                combined_df['close'] = alpha*combined_df['close'].astype(float) + (1-alpha)*pd.Series(timegpt_close[:len(combined_df)]).astype(float).values
+        else:
+            if timegpt_close is None:
+                return jsonify({'error':'No prediction available'}), 500
+            ts = pd.Series(timegpt_close[:pred_len])
+            combined_df = pd.DataFrame({'open':ts,'high':ts,'low':ts,'close':ts})
+        actual_df = None
+        if start_index is not None:
+            time_range_df = df.iloc[int(start_index):int(start_index)+lookback+pred_len]
+            if len(time_range_df) >= lookback + pred_len:
+                actual_df = time_range_df.iloc[lookback:lookback+pred_len]
+        elif start_date:
+            start_dt = pd.to_datetime(start_date)
+            mask = df['timestamps'] >= start_dt
+            time_range_df = df[mask]
+            if len(time_range_df) >= lookback + pred_len:
+                actual_df = time_range_df.iloc[lookback:lookback+pred_len]
+        else:
+            if len(df) >= lookback + pred_len:
+                actual_df = df.iloc[lookback:lookback+pred_len]
+        chart_json = create_prediction_chart(df, combined_df, lookback, pred_len, actual_df, historical_start_idx)
+        if 'timestamps' in df.columns:
+            last_timestamp = df['timestamps'].iloc[historical_start_idx+lookback-1]
+            time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
+            future_timestamps = pd.date_range(start=last_timestamp + time_diff, periods=pred_len, freq=time_diff)
+        else:
+            future_timestamps = range(historical_start_idx+lookback, historical_start_idx+lookback+pred_len)
+        prediction_results = []
+        for i, (_, row) in enumerate(combined_df.iterrows()):
+            prediction_results.append({
+                'timestamp': future_timestamps[i].isoformat() if hasattr(future_timestamps[i],'isoformat') else str(future_timestamps[i]),
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': float(row['volume']) if 'volume' in row else 0,
+                'amount': float(row['amount']) if 'amount' in row else 0
+            })
+        actual_data = []
+        if actual_df is not None:
+            for _, row in actual_df.iterrows():
+                actual_data.append({
+                    'timestamp': row['timestamps'].isoformat() if 'timestamps' in actual_df.columns else '',
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume']) if 'volume' in row else 0,
+                    'amount': float(row['amount']) if 'amount' in row else 0
+                })
+        return jsonify({
+            'success': True,
+            'prediction_type': 'Expert system (Kronos + TimeGPT)',
+            'chart': chart_json,
+            'prediction_results': prediction_results,
+            'actual_data': actual_data,
+            'has_comparison': len(actual_data) > 0,
+            'message': f'Expert prediction completed, generated {pred_len} points'
+        })
+    except Exception as e:
+        return jsonify({'error': f'Expert prediction failed: {str(e)}'}), 500
+
+@app.route('/api/timegpt-predict', methods=['POST'])
+def timegpt_predict():
+    try:
+        if not TIMEGPT_AVAILABLE:
+            return jsonify({'error': 'TimeGPT not available'}), 400
+        data = request.get_json()
+        file_path = data.get('file_path')
+        lookback = int(data.get('lookback', 400))
+        pred_len = int(data.get('pred_len', 120))
+        if not file_path:
+            return jsonify({'error': 'File path cannot be empty'}), 400
+        df, error = load_data_file(file_path)
+        if error:
+            return jsonify({'error': error}), 400
+        if len(df) < lookback + pred_len:
+            return jsonify({'error': f'Insufficient data length, need at least {lookback + pred_len} rows'}), 400
+        start_date = data.get('start_date')
+        start_index = data.get('start_index')
+        required_cols = ['open','high','low','close']
+        if 'volume' in df.columns:
+            required_cols.append('volume')
+        if start_index is not None:
+            start_index = int(start_index)
+            time_range_df = df.iloc[start_index:start_index+lookback+pred_len]
+            x_df = time_range_df.iloc[:lookback][required_cols]
+            x_timestamp = time_range_df.iloc[:lookback]['timestamps']
+            historical_start_idx = int(start_index)
+        elif start_date:
+            start_dt = pd.to_datetime(start_date)
+            mask = df['timestamps'] >= start_dt
+            time_range_df = df[mask]
+            x_df = time_range_df.iloc[:lookback][required_cols]
+            x_timestamp = time_range_df.iloc[:lookback]['timestamps']
+            historical_start_idx = df[mask].index[0] if len(df[mask]) > 0 else 0
+        else:
+            x_df = df.iloc[:lookback][required_cols]
+            x_timestamp = df.iloc[:lookback]['timestamps']
+            historical_start_idx = 0
+        hist_close_df = pd.DataFrame({'timestamps': x_timestamp, 'close': x_df['close'].values})
+        freq_hint = _infer_freq(hist_close_df)
+        timegpt_close = _timegpt_forecast_close(hist_close_df, pred_len)
+        if timegpt_close is None:
+            last_close = float(x_df['close'].iloc[-1]) if len(x_df) > 0 else None
+            if last_close is None:
+                return jsonify({'error': f'TimeGPT forecast failed. Verify NIXTLA_API_KEY and dataset frequency (inferred: {freq_hint or "unknown"}).'}), 400
+            ts = pd.Series([last_close]*pred_len)
+        else:
+            ts = pd.Series(timegpt_close[:pred_len])
+        pred_df = pd.DataFrame({'open':ts,'high':ts,'low':ts,'close':ts})
+        actual_df = None
+        if start_index is not None:
+            time_range_df = df.iloc[int(start_index):int(start_index)+lookback+pred_len]
+            if len(time_range_df) >= lookback + pred_len:
+                actual_df = time_range_df.iloc[lookback:lookback+pred_len]
+        elif start_date:
+            start_dt = pd.to_datetime(start_date)
+            mask = df['timestamps'] >= start_dt
+            time_range_df = df[mask]
+            if len(time_range_df) >= lookback + pred_len:
+                actual_df = time_range_df.iloc[lookback:lookback+pred_len]
+        else:
+            if len(df) >= lookback + pred_len:
+                actual_df = df.iloc[lookback:lookback+pred_len]
+        chart_json = create_prediction_chart(df, pred_df, lookback, pred_len, actual_df, historical_start_idx)
+        if 'timestamps' in df.columns:
+            last_timestamp = df['timestamps'].iloc[historical_start_idx+lookback-1]
+            time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
+            future_timestamps = pd.date_range(start=last_timestamp + time_diff, periods=pred_len, freq=time_diff)
+        else:
+            future_timestamps = range(historical_start_idx+lookback, historical_start_idx+lookback+pred_len)
+        prediction_results = []
+        for i, (_, row) in enumerate(pred_df.iterrows()):
+            prediction_results.append({
+                'timestamp': future_timestamps[i].isoformat() if hasattr(future_timestamps[i],'isoformat') else str(future_timestamps[i]),
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': float(row['volume']) if 'volume' in row else 0,
+                'amount': float(row['amount']) if 'amount' in row else 0
+            })
+        actual_data = []
+        if actual_df is not None:
+            for _, row in actual_df.iterrows():
+                actual_data.append({
+                    'timestamp': row['timestamps'].isoformat() if 'timestamps' in actual_df.columns else '',
+                    'open': float(row['open']),
+                    'high': float(row['high']),
+                    'low': float(row['low']),
+                    'close': float(row['close']),
+                    'volume': float(row['volume']) if 'volume' in row else 0,
+                    'amount': float(row['amount']) if 'amount' in row else 0
+                })
+        return jsonify({
+            'success': True,
+            'prediction_type': 'TimeGPT-only',
+            'chart': chart_json,
+            'prediction_results': prediction_results,
+            'actual_data': actual_data,
+            'has_comparison': len(actual_data) > 0,
+            'message': f'TimeGPT prediction completed, generated {pred_len} points'
+        })
+    except Exception as e:
+        return jsonify({'error': f'TimeGPT prediction failed: {str(e)}'}), 500
+
 @app.route('/api/load-model', methods=['POST'])
 def load_model():
     """Load Kronos model"""
@@ -667,7 +996,8 @@ def get_available_models():
     """Get available model list"""
     return jsonify({
         'models': AVAILABLE_MODELS,
-        'model_available': MODEL_AVAILABLE
+        'model_available': MODEL_AVAILABLE,
+        'timegpt_available': TIMEGPT_AVAILABLE
     })
 
 @app.route('/api/model-status')

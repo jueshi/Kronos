@@ -1,8 +1,12 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import sys
-sys.path.append("../")
+import os
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if _ROOT not in sys.path:
+    sys.path.append(_ROOT)
 from model import Kronos, KronosTokenizer, KronosPredictor
+import torch
 
 
 def plot_prediction(kline_df, pred_df):
@@ -43,11 +47,30 @@ tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
 model = Kronos.from_pretrained("NeoQuasar/Kronos-small")
 
 # 2. Instantiate Predictor
-predictor = KronosPredictor(model, tokenizer, device="cuda:0", max_context=512)
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+predictor = KronosPredictor(model, tokenizer, device=device, max_context=512)
 
 # 3. Prepare Data
-df = pd.read_csv("./data/XSHG_5min_600977.csv")
-df['timestamps'] = pd.to_datetime(df['timestamps'])
+data_path = "./data/XSHG_5min_600977.csv"
+if os.path.exists(data_path):
+    df = pd.read_csv(data_path)
+    df['timestamps'] = pd.to_datetime(df['timestamps'])
+else:
+    import numpy as np
+    total_len = 520
+    base = pd.Timestamp('2024-01-01 09:30')
+    timestamps = pd.date_range(base, periods=total_len, freq='5min')
+    close = np.cumsum(np.random.randn(total_len)) + 100
+    high = close + np.abs(np.random.randn(total_len))
+    low = close - np.abs(np.random.randn(total_len))
+    open_ = close + np.random.randn(total_len) * 0.5
+    volume = (np.random.rand(total_len) * 1000).astype(int)
+    amount = close * volume
+    df = pd.DataFrame({
+        'timestamps': timestamps,
+        'open': open_, 'high': high, 'low': low, 'close': close,
+        'volume': volume, 'amount': amount
+    })
 
 lookback = 400
 pred_len = 120

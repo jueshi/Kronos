@@ -568,6 +568,12 @@
                 <button id="predict-btn" class="btn btn-success" disabled>
                     🔮 Start Prediction
                 </button>
+                <button id="expert-predict-btn" class="btn btn-warning" disabled>
+                    🧠 Expert Predict (Kronos + TimeGPT)
+                </button>
+                <button id="timegpt-predict-btn" class="btn btn-secondary" disabled>
+                    ⏱️ TimeGPT Predict
+                </button>
 
                 <!-- Loading Status -->
                 <div id="loading" class="loading">
@@ -660,6 +666,9 @@
             
             // Initialize time slider
             initializeTimeSlider();
+
+            document.getElementById('expert-predict-btn').disabled = false;
+            document.getElementById('timegpt-predict-btn').disabled = false;
             
             console.log('✅ Application initialization completed');
         }
@@ -675,6 +684,14 @@
                 } else {
                     console.warn('⚠️ Kronos model library not available');
                     showStatus('warning', 'Kronos model library not available, will use simulated prediction');
+                }
+                const tgptBtn = document.getElementById('timegpt-predict-btn');
+                if (tgptBtn) {
+                    const tgptAvail = !!response.data.timegpt_available;
+                    tgptBtn.disabled = !tgptAvail;
+                    if (!tgptAvail) {
+                        showStatus('warning', 'TimeGPT not available. Set NIXTLA_API_KEY to enable');
+                    }
                 }
             } catch (error) {
                 console.error('❌ Failed to load available models:', error);
@@ -970,8 +987,8 @@
             const endDate = new Date(endTime);
             
             // Update display information
-            document.getElementById('window-start').textContent = `Start: ${startDate.toLocaleDateString()}`;
-            document.getElementById('window-end').textContent = `End: ${endDate.toLocaleDateString()}`;
+            document.getElementById('window-start').textContent = `Start: ${startDate.toLocaleString()}`;
+            document.getElementById('window-end').textContent = `End: ${endDate.toLocaleString()}`;
             
             // Display fixed window size
             document.getElementById('window-size').textContent = `Window Size: 400 + 120 = 520 data points (fixed)`;
@@ -1060,6 +1077,9 @@
                 const totalTime = sliderData.endDate.getTime() - sliderData.startDate.getTime();
                 const startTime = sliderData.startDate.getTime() + (totalTime * startPercentage);
                 const startDate = new Date(startTime);
+
+                const maxStart = Math.max(0, sliderData.totalRows - (lookback + predLen));
+                const startIndex = Math.round(startPercentage * maxStart);
                 
                 // Get prediction quality parameters
                 const temperature = parseFloat(document.getElementById('temperature').value);
@@ -1070,7 +1090,8 @@
                     file_path: currentDataFile,
                     lookback: lookback,
                     pred_len: predLen,
-                    start_date: startDate.toISOString().slice(0, 16), // Format as YYYY-MM-DDTHH:MM
+                    start_index: startIndex,
+                    start_date: startDate.toISOString(),
                     temperature: temperature,
                     top_p: topP,
                     sample_count: sampleCount
@@ -1107,6 +1128,100 @@
                 displayComparisonAnalysis(result);
             } else {
                 document.getElementById('comparison-section').style.display = 'none';
+            }
+        }
+
+        async function startExpertPrediction() {
+            if (!currentDataFile) {
+                showStatus('error', 'Please load data file first');
+                return;
+            }
+            try {
+                showLoading(true);
+                document.getElementById('expert-predict-btn').disabled = true;
+                const lookback = parseInt(document.getElementById('lookback').value);
+                const predLen = parseInt(document.getElementById('pred-len').value);
+                const startHandle = document.getElementById('start-handle');
+                const startPercentage = parseFloat(startHandle.style.left) / 100;
+                if (!sliderData) {
+                    showStatus('error', 'Time window slider not initialized');
+                    return;
+                }
+                const totalTime = sliderData.endDate.getTime() - sliderData.startDate.getTime();
+                const startTime = sliderData.startDate.getTime() + (totalTime * startPercentage);
+                const startDate = new Date(startTime);
+                const alpha = 0.5;
+                const temperature = parseFloat(document.getElementById('temperature').value);
+                const topP = parseFloat(document.getElementById('top-p').value);
+                const sampleCount = parseInt(document.getElementById('sample-count').value);
+                const maxStart = Math.max(0, sliderData.totalRows - (lookback + predLen));
+                const startIndex = Math.round(startPercentage * maxStart);
+                const response = await axios.post('/api/expert-predict', {
+                    file_path: currentDataFile,
+                    lookback: lookback,
+                    pred_len: predLen,
+                    start_index: startIndex,
+                    start_date: startDate.toISOString(),
+                    alpha: alpha,
+                    temperature: temperature,
+                    top_p: topP,
+                    sample_count: sampleCount
+                });
+                if (response.data.success) {
+                    displayPredictionResult(response.data);
+                    showStatus('success', response.data.message);
+                } else {
+                    showStatus('error', response.data.error);
+                }
+            } catch (error) {
+                showStatus('error', `Expert prediction failed: ${error.response?.data?.error || error.message}`);
+            } finally {
+                showLoading(false);
+                document.getElementById('expert-predict-btn').disabled = false;
+            }
+        }
+
+        async function startTimegptPrediction() {
+            if (!currentDataFile) {
+                showStatus('error', 'Please load data file first');
+                return;
+            }
+            try {
+                showLoading(true);
+                const btn = document.getElementById('timegpt-predict-btn');
+                if (btn) btn.disabled = true;
+                const lookback = parseInt(document.getElementById('lookback').value);
+                const predLen = parseInt(document.getElementById('pred-len').value);
+                const startHandle = document.getElementById('start-handle');
+                const startPercentage = parseFloat(startHandle.style.left) / 100;
+                if (!sliderData) {
+                    showStatus('error', 'Time window slider not initialized');
+                    return;
+                }
+                const totalTime = sliderData.endDate.getTime() - sliderData.startDate.getTime();
+                const startTime = sliderData.startDate.getTime() + (totalTime * startPercentage);
+                const startDate = new Date(startTime);
+                const maxStart = Math.max(0, sliderData.totalRows - (lookback + predLen));
+                const startIndex = Math.round(startPercentage * maxStart);
+                const response = await axios.post('/api/timegpt-predict', {
+                    file_path: currentDataFile,
+                    lookback: lookback,
+                    pred_len: predLen,
+                    start_index: startIndex,
+                    start_date: startDate.toISOString()
+                });
+                if (response.data.success) {
+                    displayPredictionResult(response.data);
+                    showStatus('success', response.data.message);
+                } else {
+                    showStatus('error', response.data.error);
+                }
+            } catch (error) {
+                showStatus('error', `TimeGPT prediction failed: ${error.response?.data?.error || error.message}`);
+            } finally {
+                showLoading(false);
+                const btn = document.getElementById('timegpt-predict-btn');
+                if (btn) btn.disabled = false;
             }
         }
 
@@ -1196,6 +1311,8 @@
             
             // Prediction button
             document.getElementById('predict-btn').addEventListener('click', startPrediction);
+            document.getElementById('expert-predict-btn').addEventListener('click', startExpertPrediction);
+            document.getElementById('timegpt-predict-btn').addEventListener('click', startTimegptPrediction);
             
             // Prediction quality parameter sliders
             document.getElementById('temperature').addEventListener('input', function() {
