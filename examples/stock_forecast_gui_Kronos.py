@@ -103,6 +103,8 @@ class App:
         self.top_p_var = tk.DoubleVar(value=0.9)
         self.top_k_var = tk.IntVar(value=0)
         self.sample_count_var = tk.IntVar(value=3)
+        self.show_full_moon_var = tk.BooleanVar(value=False)
+        self.show_new_moon_var = tk.BooleanVar(value=False)
         self._build_ui()
 
         # Kronos initialization
@@ -242,6 +244,10 @@ class App:
         g1.pack(fill=tk.X, padx=8)
         self.auto_fix_ts_cb = ttk.Checkbutton(g1, text="Auto-fix timestamps (dedupe & fill gaps)", variable=self.auto_fix_ts_var)
         self.auto_fix_ts_cb.grid(row=0, column=0, sticky=tk.W)
+        self.full_moon_cb = ttk.Checkbutton(g1, text="Show Full Moon", variable=self.show_full_moon_var)
+        self.full_moon_cb.grid(row=0, column=1, sticky=tk.W)
+        self.new_moon_cb = ttk.Checkbutton(g1, text="Show New Moon", variable=self.show_new_moon_var)
+        self.new_moon_cb.grid(row=0, column=2, sticky=tk.W)
 
         g1b = ttk.Frame(frame)
         g1b.pack(fill=tk.X, padx=8)
@@ -250,8 +256,7 @@ class App:
         ttk.Label(g1b, text="Method").grid(row=0, column=1, sticky=tk.W)
         self.impute_method_cb = ttk.Combobox(g1b, textvariable=self.impute_method_var, values=["ffill","bfill","ffill_bfill","interpolate","interpolate_ffill_bfill"], width=12)
         self.impute_method_cb.grid(row=0, column=2, sticky=tk.W)
-        self.auto_fix_ts_cb = ttk.Checkbutton(g1, text="Auto-fix timestamps (dedupe & fill gaps)", variable=self.auto_fix_ts_var)
-        self.auto_fix_ts_cb.grid(row=0, column=6, sticky=tk.W)
+        # Duplicate auto_fix_ts checkbox removed
 
         # Remove TimeGPT finetune controls
 
@@ -285,6 +290,8 @@ class App:
         self.add_tooltip(self.auto_fix_ts_cb, "Ensures continuous timestamps by de-duplicating and filling missing dates.")
         self.add_tooltip(self.impute_target_cb, "Fill missing target values created by the time grid.")
         self.add_tooltip(self.impute_method_cb, "Choose ffill/bfill/ffill_bfill/interpolate for imputation.")
+        self.add_tooltip(self.full_moon_cb, "Mark full moon dates; if non-trading, use previous trading day.")
+        self.add_tooltip(self.new_moon_cb, "Mark new moon dates; if non-trading, use previous trading day.")
         self.add_tooltip(self.h_entry, "Forecast horizon h (integer).")
         self.add_tooltip(self.display_start_entry, "Plot start time. Leave empty to auto.")
         self.add_tooltip(self.display_end_entry, "Plot end time. Leave empty to auto.")
@@ -704,6 +711,18 @@ class App:
             self._setup_hover(ax, [(x, y, "Actual")])
         except Exception:
             pass
+        try:
+            if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()):
+                self._plot_moon_markers(
+                    ax,
+                    act_df,
+                    time_col,
+                    target_col,
+                    bool(self.show_full_moon_var.get()),
+                    bool(self.show_new_moon_var.get()),
+                )
+        except Exception:
+            pass
 
     def run_forecast(self):
         if self.df is None:
@@ -892,6 +911,18 @@ class App:
                 self._setup_hover(ax, series)
         except Exception:
             pass
+        try:
+            if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()):
+                self._plot_moon_markers(
+                    ax,
+                    act_ext,
+                    time_col,
+                    target_col if target_col in act_ext.columns else 'close',
+                    bool(self.show_full_moon_var.get()),
+                    bool(self.show_new_moon_var.get()),
+                )
+        except Exception:
+            pass
 
     def _setup_hover(self, ax, series_list):
         import numpy as np
@@ -944,6 +975,67 @@ class App:
         self._hover_cid = fig.canvas.mpl_connect('motion_notify_event', on_move)
         self._hover_vline = vline
         self._hover_annot = annot
+
+    def _compute_moon_dates(self, start_ts, end_ts):
+        import ephem
+        import datetime as _dt
+        fulls = []
+        news = []
+        cur = start_ts.to_pydatetime() if hasattr(start_ts, 'to_pydatetime') else _dt.datetime.fromtimestamp(pd.to_datetime(start_ts).timestamp())
+        end_py = end_ts.to_pydatetime() if hasattr(end_ts, 'to_pydatetime') else _dt.datetime.fromtimestamp(pd.to_datetime(end_ts).timestamp())
+        f = ephem.next_full_moon(cur)
+        while f.datetime() <= end_py:
+            fulls.append(pd.to_datetime(f.datetime()))
+            f = ephem.next_full_moon(f)
+        n = ephem.next_new_moon(cur)
+        while n.datetime() <= end_py:
+            news.append(pd.to_datetime(n.datetime()))
+            n = ephem.next_new_moon(n)
+        return fulls, news
+
+    def _plot_moon_markers(self, ax, df, time_col, target_col, show_full, show_new):
+        if df is None or df.empty:
+            return
+        idx = pd.DatetimeIndex(pd.to_datetime(df[time_col]).dropna().sort_values())
+        start = idx.min()
+        end = idx.max()
+        fulls, news = self._compute_moon_dates(start, end)
+        def adjust(dt):
+            ts = pd.to_datetime(dt)
+            i = idx.get_indexer([ts], method='pad')
+            if len(i) and i[0] >= 0:
+                return idx[i[0]]
+            return None
+        xs_f = []
+        ys_f = []
+        xs_n = []
+        ys_n = []
+        # Build a mapping Series for fast y lookup
+        df_map = df.copy()
+        df_map[time_col] = pd.to_datetime(df_map[time_col])
+        df_map = df_map.dropna(subset=[time_col, target_col])
+        for d in fulls:
+            a = adjust(d)
+            if a is not None:
+                xs_f.append(a)
+                try:
+                    ys_f.append(df_map.loc[df_map[time_col] == a, target_col].iloc[0])
+                except Exception:
+                    continue
+        for d in news:
+            a = adjust(d)
+            if a is not None:
+                xs_n.append(a)
+                try:
+                    ys_n.append(df_map.loc[df_map[time_col] == a, target_col].iloc[0])
+                except Exception:
+                    continue
+        if show_full and xs_f:
+            ax.scatter(xs_f, ys_f, s=30, color="#d62728", label="Full Moon")
+        if show_new and xs_n:
+            ax.scatter(xs_n, ys_n, s=30, color="#9467bd", label="New Moon")
+        handles, labels = ax.get_legend_handles_labels()
+        ax.legend(handles, labels, loc="best")
 
     def update_plot(self):
         if self.last_fcst_df is None:

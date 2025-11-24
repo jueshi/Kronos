@@ -17,6 +17,7 @@ flask-cors = "*"
 nixtla = "*"
 python-dotenv = "*"
 yfinance = "*"
+ephem = "*"
 
 [dev-packages]
 flake8 = "*"
