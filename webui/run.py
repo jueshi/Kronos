@@ -79,7 +79,8 @@ def main():
         webbrowser.open('http://localhost:7070')
         
         # Start Flask application
-        app.run(debug=True, host='0.0.0.0', port=7070)
+        # Disable Werkzeug reloader to prevent SystemExit under debuggers (e.g., debugpy)
+        app.run(debug=True, host='0.0.0.0', port=7070, use_reloader=False)
         
     except Exception as e:
         print(f"❌ Startup failed: {e}")
