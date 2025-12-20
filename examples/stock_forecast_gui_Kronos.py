@@ -112,6 +112,8 @@ class App:
         self.show_earnings_var = tk.BooleanVar(value=False)
         self.show_insider_var = tk.BooleanVar(value=False)
         self.show_insider_proposed_var = tk.BooleanVar(value=False)
+        self.insider_tooltips_var = tk.BooleanVar(value=False)
+        self.show_insider_proposed_var = tk.BooleanVar(value=False)
         self._build_ui()
 
         # Kronos initialization
@@ -274,6 +276,10 @@ class App:
         self.insider_cb.grid(row=0, column=4, sticky=tk.W)
         self.insider_proposed_cb = ttk.Checkbutton(g1, text="Show Proposed Insider Sales", variable=self.show_insider_proposed_var, command=self._on_overlay_toggle)
         self.insider_proposed_cb.grid(row=0, column=5, sticky=tk.W)
+        self.insider_tooltips_cb = ttk.Checkbutton(g1, text="Insider Tooltips", variable=self.insider_tooltips_var, command=self._on_overlay_toggle)
+        self.insider_tooltips_cb.grid(row=0, column=6, sticky=tk.W)
+        self.insider_proposed_cb = ttk.Checkbutton(g1, text="Show Proposed Insider Sales", variable=self.show_insider_proposed_var, command=self._on_overlay_toggle)
+        self.insider_proposed_cb.grid(row=0, column=5, sticky=tk.W)
 
         g1b = ttk.Frame(frame)
         g1b.pack(fill=tk.X, padx=8)
@@ -321,6 +327,7 @@ class App:
         self.add_tooltip(self.earnings_cb, "Mark company earnings release dates using the selected symbol.")
         self.add_tooltip(self.insider_cb, "Plot historical insider sale transactions; bubble size reflects transaction value.")
         self.add_tooltip(self.insider_proposed_cb, "Show proposed future insider sales as red dashed v-lines.")
+        self.add_tooltip(self.insider_tooltips_cb, "Enable hover tooltips for insider sales with seller and % holdings sold when available.")
         self.add_tooltip(self.h_entry, "Forecast horizon h (integer).")
         self.add_tooltip(self.display_start_entry, "Plot start time. Leave empty to auto.")
         self.add_tooltip(self.display_end_entry, "Plot end time. Leave empty to auto.")
@@ -1833,6 +1840,7 @@ class App:
         vals = pd.to_numeric(sales.get('Value', pd.Series([0]*len(sales))), errors='coerce').fillna(0.0)
         vmax = float(vals.max()) if len(vals) else 0.0
         mapped = 0
+        mapped_records = []
         for _, row in sales.iterrows():
             pos = adjust(row['Date'])
             if pos is not None and pos >= 0 and pos < len(df_sorted):
@@ -1848,13 +1856,256 @@ class App:
                 else:
                     sizes.append(80)
                 mapped += 1
+                try:
+                    rec = {
+                        "Who": row.get("Who"),
+                        "Transaction": row.get("TransactionText") if "TransactionText" in sales.columns else (row.get("Transaction") if "Transaction" in sales.columns else row.get("TransactionType")),
+                        "Date": row.get("Date"),
+                        "Shares": row.get("Shares"),
+                        "Value": row.get("Value") if "Value" in sales.columns else row.get("TotalValue"),
+                        "Cost": row.get("Cost"),
+                    }
+                    pct = None
+                    for kc in ["SharesOwned","Owned","Holdings","Ownership","%Owned","Percent"]:
+                        v = row.get(kc)
+                        try:
+                            if v is not None:
+                                if kc in ["Ownership","%Owned","Percent"] and isinstance(v, str):
+                                    vs = str(v).strip().strip("%")
+                                    pct = float(vs)
+                                    break
+                                sv = float(row.get("Shares")) if row.get("Shares") is not None else None
+                                ov = float(v)
+                                if sv is not None and ov and ov != 0:
+                                    pct = 100.0 * sv / ov
+                                    break
+                        except Exception:
+                            continue
+                    rec["PercentSold"] = pct
+                    mapped_records.append(rec)
+                except Exception:
+                    pass
         pts_x = [x for x, y in zip(xs, ys) if y is not None]
         pts_y = [y for y in ys if y is not None]
         pts_s = [s for s, y in zip(sizes, ys) if y is not None]
         try:
             if pts_x:
                 print("Debug: plotting insider scatter points", len(pts_x))
-                ax.scatter(pts_x, pts_y, s=pts_s, color="#8c564b", edgecolors="black", alpha=0.8, label="Insider Sales")
+                coll = ax.scatter(pts_x, pts_y, s=pts_s, color="#8c564b", edgecolors="black", alpha=0.8, label="Insider Sales")
+                if bool(self.insider_tooltips_var.get()):
+                    try:
+                        import mplcursors
+                        disp_records = mapped_records
+                        cur = mplcursors.cursor(coll, hover=True)
+                        def _on_add(sel):
+                            try:
+                                i = int(sel.index)
+                            except Exception:
+                                return
+                            if i < 0 or i >= len(disp_records):
+                                return
+                            r = disp_records[i]
+                            who = str(r.get("Who") or "").strip()
+                            tx = str(r.get("Transaction") or "Sale").strip()
+                            dt = r.get("Date")
+                            sh = r.get("Shares")
+                            val = r.get("Value")
+                            cost = r.get("Cost")
+                            pct = r.get("PercentSold")
+                            txt = f"{who} ({tx})"
+                            if dt is not None:
+                                txt += f"\nDate: {pd.to_datetime(dt)}"
+                            if sh is not None:
+                                try:
+                                    txt += f"\nShares: {int(float(sh)):,}"
+                                except Exception:
+                                    txt += f"\nShares: {sh}"
+                            if val is not None:
+                                try:
+                                    txt += f"\nValue: ${float(val):,.0f}"
+                                except Exception:
+                                    txt += f"\nValue: {val}"
+                            if cost is not None:
+                                try:
+                                    txt += f"\nPrice: ${float(cost):.2f}"
+                                except Exception:
+                                    txt += f"\nPrice: {cost}"
+                            if pct is not None:
+                                try:
+                                    txt += f"\n% Holding Sold: {float(pct):.2f}%"
+                                except Exception:
+                                    txt += f"\n% Holding Sold: {pct}"
+                            sel.annotation.set_text(txt)
+                        cur.connect("add", _on_add)
+                        try:
+                            self.status_var.set("Insider tooltips: hover enabled")
+                        except Exception:
+                            pass
+                    except Exception:
+                        try:
+                            coll.set_picker(True)
+                            disp_records = mapped_records
+                            fig = ax.figure
+                            annot = ax.annotate("", xy=(0, 0), xytext=(8, 8), textcoords="offset points")
+                            annot.set_visible(False)
+                            def _on_pick(ev):
+                                inds = getattr(ev, "ind", [])
+                                if not inds:
+                                    return
+                                i = int(inds[0])
+                                if i < 0 or i >= len(disp_records):
+                                    return
+                                r = disp_records[i]
+                                x = pts_x[i]
+                                y = pts_y[i]
+                                who = str(r.get("Who") or "").strip()
+                                tx = str(r.get("Transaction") or "Sale").strip()
+                                dt = r.get("Date")
+                                sh = r.get("Shares")
+                                val = r.get("Value")
+                                cost = r.get("Cost")
+                                pct = r.get("PercentSold")
+                                txt = f"{who} ({tx})"
+                                if dt is not None:
+                                    txt += f"\nDate: {pd.to_datetime(dt)}"
+                                if sh is not None:
+                                    try:
+                                        txt += f"\nShares: {int(float(sh)):,}"
+                                    except Exception:
+                                        txt += f"\nShares: {sh}"
+                                if val is not None:
+                                    try:
+                                        txt += f"\nValue: ${float(val):,.0f}"
+                                    except Exception:
+                                        txt += f"\nValue: {val}"
+                                if cost is not None:
+                                    try:
+                                        txt += f"\nPrice: ${float(cost):.2f}"
+                                    except Exception:
+                                        txt += f"\nPrice: {cost}"
+                                if pct is not None:
+                                    try:
+                                        txt += f"\n% Holding Sold: {float(pct):.2f}%"
+                                    except Exception:
+                                        txt += f"\n% Holding Sold: {pct}"
+                                annot.set_text(txt)
+                                annot.xy = (x, y)
+                                annot.set_visible(True)
+                                fig.canvas.draw_idle()
+                            fig.canvas.mpl_connect("pick_event", _on_pick)
+                            try:
+                                self.status_var.set("Insider tooltips: click on bubble for details")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                if bool(self.insider_tooltips_var.get()):
+                    try:
+                        import mplcursors
+                        disp_records = mapped_records
+                        cur = mplcursors.cursor(coll, hover=True)
+                        def _on_add(sel):
+                            try:
+                                i = int(sel.index)
+                            except Exception:
+                                return
+                            if i < 0 or i >= len(disp_records):
+                                return
+                            r = disp_records[i]
+                            who = str(r.get("Who") or "").strip()
+                            tx = str(r.get("Transaction") or "Sale").strip()
+                            dt = r.get("Date")
+                            sh = r.get("Shares")
+                            val = r.get("Value")
+                            cost = r.get("Cost")
+                            pct = r.get("PercentSold")
+                            txt = f"{who} ({tx})"
+                            if dt is not None:
+                                txt += f"\nDate: {pd.to_datetime(dt)}"
+                            if sh is not None:
+                                try:
+                                    txt += f"\nShares: {int(float(sh)):,}"
+                                except Exception:
+                                    txt += f"\nShares: {sh}"
+                            if val is not None:
+                                try:
+                                    txt += f"\nValue: ${float(val):,.0f}"
+                                except Exception:
+                                    txt += f"\nValue: {val}"
+                            if cost is not None:
+                                try:
+                                    txt += f"\nPrice: ${float(cost):.2f}"
+                                except Exception:
+                                    txt += f"\nPrice: {cost}"
+                            if pct is not None:
+                                try:
+                                    txt += f"\n% Holding Sold: {float(pct):.2f}%"
+                                except Exception:
+                                    txt += f"\n% Holding Sold: {pct}"
+                            sel.annotation.set_text(txt)
+                        cur.connect("add", _on_add)
+                        try:
+                            self.status_var.set("Insider tooltips: hover enabled")
+                        except Exception:
+                            pass
+                    except Exception:
+                        try:
+                            coll.set_picker(True)
+                            disp_records = mapped_records
+                            fig = ax.figure
+                            annot = ax.annotate("", xy=(0, 0), xytext=(8, 8), textcoords="offset points")
+                            annot.set_visible(False)
+                            def _on_pick(ev):
+                                inds = getattr(ev, "ind", [])
+                                if not inds:
+                                    return
+                                i = int(inds[0])
+                                if i < 0 or i >= len(disp_records):
+                                    return
+                                r = disp_records[i]
+                                x = pts_x[i]
+                                y = pts_y[i]
+                                who = str(r.get("Who") or "").strip()
+                                tx = str(r.get("Transaction") or "Sale").strip()
+                                dt = r.get("Date")
+                                sh = r.get("Shares")
+                                val = r.get("Value")
+                                cost = r.get("Cost")
+                                pct = r.get("PercentSold")
+                                txt = f"{who} ({tx})"
+                                if dt is not None:
+                                    txt += f"\nDate: {pd.to_datetime(dt)}"
+                                if sh is not None:
+                                    try:
+                                        txt += f"\nShares: {int(float(sh)):,}"
+                                    except Exception:
+                                        txt += f"\nShares: {sh}"
+                                if val is not None:
+                                    try:
+                                        txt += f"\nValue: ${float(val):,.0f}"
+                                    except Exception:
+                                        txt += f"\nValue: {val}"
+                                if cost is not None:
+                                    try:
+                                        txt += f"\nPrice: ${float(cost):.2f}"
+                                    except Exception:
+                                        txt += f"\nPrice: {cost}"
+                                if pct is not None:
+                                    try:
+                                        txt += f"\n% Holding Sold: {float(pct):.2f}%"
+                                    except Exception:
+                                        txt += f"\n% Holding Sold: {pct}"
+                                annot.set_text(txt)
+                                annot.xy = (x, y)
+                                annot.set_visible(True)
+                                fig.canvas.draw_idle()
+                            fig.canvas.mpl_connect("pick_event", _on_pick)
+                            try:
+                                self.status_var.set("Insider tooltips: click on bubble for details")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
             if bool(self.show_marker_vlines_var.get()):
                 print("Debug: plotting insider vlines", len(xs))
                 for x in xs:
@@ -1876,6 +2127,7 @@ class App:
                 "earnings": bool(self.show_earnings_var.get()),
                 "insider": bool(self.show_insider_var.get()),
                 "insider_proposed": bool(self.show_insider_proposed_var.get()),
+                "insider_tooltips": bool(self.insider_tooltips_var.get()),
                 "full_moon": bool(self.show_full_moon_var.get()),
                 "new_moon": bool(self.show_new_moon_var.get()),
             })
@@ -2382,6 +2634,7 @@ if __name__ == "__main__":
         vals = pd.to_numeric(sales.get('Value', pd.Series([0]*len(sales))), errors='coerce').fillna(0.0)
         vmax = float(vals.max()) if len(vals) else 0.0
         mapped = 0
+        mapped_records = []
         for _, row in sales.iterrows():
             pos = adjust(row['Date'])
             if pos is not None and pos >= 0 and pos < len(df_sorted):
@@ -2397,13 +2650,141 @@ if __name__ == "__main__":
                 else:
                     sizes.append(80)
                 mapped += 1
+                try:
+                    rec = {
+                        "Who": row.get("Who"),
+                        "Transaction": row.get("TransactionText") if "TransactionText" in sales.columns else (row.get("Transaction") if "Transaction" in sales.columns else row.get("TransactionType")),
+                        "Date": row.get("Date"),
+                        "Shares": row.get("Shares"),
+                        "Value": row.get("Value") if "Value" in sales.columns else row.get("TotalValue"),
+                        "Cost": row.get("Cost"),
+                    }
+                    pct = None
+                    for kc in ["SharesOwned","Owned","Holdings","Ownership","%Owned","Percent"]:
+                        v = row.get(kc)
+                        try:
+                            if v is not None:
+                                if kc in ["Ownership","%Owned","Percent"] and isinstance(v, str):
+                                    vs = str(v).strip().strip("%")
+                                    pct = float(vs)
+                                    break
+                                sv = float(row.get("Shares")) if row.get("Shares") is not None else None
+                                ov = float(v)
+                                if sv is not None and ov and ov != 0:
+                                    pct = 100.0 * sv / ov
+                                    break
+                        except Exception:
+                            continue
+                    rec["PercentSold"] = pct
+                    mapped_records.append(rec)
+                except Exception:
+                    pass
         pts_x = [x for x, y in zip(xs, ys) if y is not None]
         pts_y = [y for y in ys if y is not None]
         pts_s = [s for s, y in zip(sizes, ys) if y is not None]
         try:
             if pts_x:
                 print("Debug: plotting insider scatter points", len(pts_x))
-                ax.scatter(pts_x, pts_y, s=pts_s, color="#8c564b", edgecolors="black", alpha=0.8, label="Insider Sales")
+                coll = ax.scatter(pts_x, pts_y, s=pts_s, color="#8c564b", edgecolors="black", alpha=0.8, label="Insider Sales")
+                if bool(self.insider_tooltips_var.get()):
+                    try:
+                        import mplcursors
+                        disp_records = mapped_records
+                        cur = mplcursors.cursor(coll, hover=True)
+                        def _on_add(sel):
+                            try:
+                                i = int(sel.index)
+                            except Exception:
+                                return
+                            if i < 0 or i >= len(disp_records):
+                                return
+                            r = disp_records[i]
+                            who = str(r.get("Who") or "").strip()
+                            tx = str(r.get("Transaction") or "Sale").strip()
+                            dt = r.get("Date")
+                            sh = r.get("Shares")
+                            val = r.get("Value")
+                            cost = r.get("Cost")
+                            pct = r.get("PercentSold")
+                            txt = f"{who} ({tx})"
+                            if dt is not None:
+                                txt += f"\nDate: {pd.to_datetime(dt)}"
+                            if sh is not None:
+                                try:
+                                    txt += f"\nShares: {int(float(sh)):,}"
+                                except Exception:
+                                    txt += f"\nShares: {sh}"
+                            if val is not None:
+                                try:
+                                    txt += f"\nValue: ${float(val):,.0f}"
+                                except Exception:
+                                    txt += f"\nValue: {val}"
+                            if cost is not None:
+                                try:
+                                    txt += f"\nPrice: ${float(cost):.2f}"
+                                except Exception:
+                                    txt += f"\nPrice: {cost}"
+                            if pct is not None:
+                                try:
+                                    txt += f"\n% Holding Sold: {float(pct):.2f}%"
+                                except Exception:
+                                    txt += f"\n% Holding Sold: {pct}"
+                            sel.annotation.set_text(txt)
+                        cur.connect("add", _on_add)
+                    except Exception:
+                        try:
+                            coll.set_picker(True)
+                            disp_records = mapped_records
+                            fig = ax.figure
+                            annot = ax.annotate("", xy=(0, 0), xytext=(8, 8), textcoords="offset points")
+                            annot.set_visible(False)
+                            def _on_pick(ev):
+                                inds = getattr(ev, "ind", [])
+                                if not inds:
+                                    return
+                                i = int(inds[0])
+                                if i < 0 or i >= len(disp_records):
+                                    return
+                                r = disp_records[i]
+                                x = pts_x[i]
+                                y = pts_y[i]
+                                who = str(r.get("Who") or "").strip()
+                                tx = str(r.get("Transaction") or "Sale").strip()
+                                dt = r.get("Date")
+                                sh = r.get("Shares")
+                                val = r.get("Value")
+                                cost = r.get("Cost")
+                                pct = r.get("PercentSold")
+                                txt = f"{who} ({tx})"
+                                if dt is not None:
+                                    txt += f"\nDate: {pd.to_datetime(dt)}"
+                                if sh is not None:
+                                    try:
+                                        txt += f"\nShares: {int(float(sh)):,}"
+                                    except Exception:
+                                        txt += f"\nShares: {sh}"
+                                if val is not None:
+                                    try:
+                                        txt += f"\nValue: ${float(val):,.0f}"
+                                    except Exception:
+                                        txt += f"\nValue: {val}"
+                                if cost is not None:
+                                    try:
+                                        txt += f"\nPrice: ${float(cost):.2f}"
+                                    except Exception:
+                                        txt += f"\nPrice: {cost}"
+                                if pct is not None:
+                                    try:
+                                        txt += f"\n% Holding Sold: {float(pct):.2f}%"
+                                    except Exception:
+                                        txt += f"\n% Holding Sold: {pct}"
+                                annot.set_text(txt)
+                                annot.xy = (x, y)
+                                annot.set_visible(True)
+                                fig.canvas.draw_idle()
+                            fig.canvas.mpl_connect("pick_event", _on_pick)
+                        except Exception:
+                            pass
             if bool(self.show_marker_vlines_var.get()):
                 print("Debug: plotting insider vlines", len(xs))
                 for x in xs:
@@ -2495,6 +2876,8 @@ if __name__ == "__main__":
             print("Debug: overlay toggled", {
                 "earnings": bool(self.show_earnings_var.get()),
                 "insider": bool(self.show_insider_var.get()),
+                "insider_proposed": bool(self.show_insider_proposed_var.get()),
+                "insider_tooltips": bool(self.insider_tooltips_var.get()),
                 "full_moon": bool(self.show_full_moon_var.get()),
                 "new_moon": bool(self.show_new_moon_var.get()),
             })
