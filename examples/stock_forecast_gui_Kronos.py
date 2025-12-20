@@ -105,6 +105,13 @@ class App:
         self.sample_count_var = tk.IntVar(value=3)
         self.show_full_moon_var = tk.BooleanVar(value=False)
         self.show_new_moon_var = tk.BooleanVar(value=False)
+        self.marker_mode_var = tk.BooleanVar(value=False)
+        self.marker_text_var = tk.StringVar(value="")
+        self.marker_series_var = tk.StringVar(value="Actual")
+        self.show_marker_vlines_var = tk.BooleanVar(value=False)
+        self.show_earnings_var = tk.BooleanVar(value=False)
+        self.show_insider_var = tk.BooleanVar(value=False)
+        self.show_insider_proposed_var = tk.BooleanVar(value=False)
         self._build_ui()
 
         # Kronos initialization
@@ -119,6 +126,13 @@ class App:
             self.kronos_model = None
             self.kronos_predictor = None
         self.table_win = None
+        self.last_act_df = None
+        self.last_act_time_col = None
+        self.last_act_target = None
+        self.markers = []
+        self._marker_pending_text = None
+        self._marker_pending_series = None
+        self._marker_click_cid = None
 
     def _build_ui(self):
         top = ttk.Frame(self.root)
@@ -230,6 +244,12 @@ class App:
         ttk.Button(actions, text="Clear Plot", command=self.clear_plot).pack(side=tk.LEFT)
         ttk.Button(actions, text="Update Plot", command=self.update_plot).pack(side=tk.LEFT, padx=6)
         ttk.Button(actions, text="Show Table", command=self.show_table).pack(side=tk.LEFT, padx=6)
+        ttk.Label(actions, text="Marker Text").pack(side=tk.LEFT)
+        ttk.Entry(actions, textvariable=self.marker_text_var, width=18).pack(side=tk.LEFT, padx=4)
+        ttk.Label(actions, text="Series").pack(side=tk.LEFT)
+        ttk.Combobox(actions, textvariable=self.marker_series_var, values=["Actual","Forecast"], width=10).pack(side=tk.LEFT)
+        ttk.Checkbutton(actions, text="Marker Mode", variable=self.marker_mode_var, command=self._toggle_marker_mode).pack(side=tk.LEFT, padx=6)
+        ttk.Checkbutton(actions, text="VLines", variable=self.show_marker_vlines_var, command=lambda: self._render_markers(self.figure.gca() if self.figure else None)).pack(side=tk.LEFT, padx=6)
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(self.root, textvariable=self.status_var).pack(fill=tk.X, padx=8, pady=4)
@@ -248,6 +268,12 @@ class App:
         self.full_moon_cb.grid(row=0, column=1, sticky=tk.W)
         self.new_moon_cb = ttk.Checkbutton(g1, text="Show New Moon", variable=self.show_new_moon_var)
         self.new_moon_cb.grid(row=0, column=2, sticky=tk.W)
+        self.earnings_cb = ttk.Checkbutton(g1, text="Show Earnings", variable=self.show_earnings_var, command=self._on_overlay_toggle)
+        self.earnings_cb.grid(row=0, column=3, sticky=tk.W)
+        self.insider_cb = ttk.Checkbutton(g1, text="Show Insider Sales", variable=self.show_insider_var, command=self._on_overlay_toggle)
+        self.insider_cb.grid(row=0, column=4, sticky=tk.W)
+        self.insider_proposed_cb = ttk.Checkbutton(g1, text="Show Proposed Insider Sales", variable=self.show_insider_proposed_var, command=self._on_overlay_toggle)
+        self.insider_proposed_cb.grid(row=0, column=5, sticky=tk.W)
 
         g1b = ttk.Frame(frame)
         g1b.pack(fill=tk.X, padx=8)
@@ -292,6 +318,9 @@ class App:
         self.add_tooltip(self.impute_method_cb, "Choose ffill/bfill/ffill_bfill/interpolate for imputation.")
         self.add_tooltip(self.full_moon_cb, "Mark full moon dates; if non-trading, use previous trading day.")
         self.add_tooltip(self.new_moon_cb, "Mark new moon dates; if non-trading, use previous trading day.")
+        self.add_tooltip(self.earnings_cb, "Mark company earnings release dates using the selected symbol.")
+        self.add_tooltip(self.insider_cb, "Plot historical insider sale transactions; bubble size reflects transaction value.")
+        self.add_tooltip(self.insider_proposed_cb, "Show proposed future insider sales as red dashed v-lines.")
         self.add_tooltip(self.h_entry, "Forecast horizon h (integer).")
         self.add_tooltip(self.display_start_entry, "Plot start time. Leave empty to auto.")
         self.add_tooltip(self.display_end_entry, "Plot end time. Leave empty to auto.")
@@ -711,6 +740,9 @@ class App:
             self._setup_hover(ax, [(x, y, "Actual")])
         except Exception:
             pass
+        self.last_act_df = act_df
+        self.last_act_time_col = time_col
+        self.last_act_target = target_col
         try:
             if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()):
                 self._plot_moon_markers(
@@ -723,6 +755,26 @@ class App:
                 )
         except Exception:
             pass
+        try:
+            if hasattr(self, 'show_earnings_var') and bool(self.show_earnings_var.get()):
+                try:
+                    print("Debug: visualizing earnings overlay", {"symbol": self.symbol_var.get().strip(), "rows": len(act_df)})
+                except Exception:
+                    pass
+                self._plot_earnings_markers(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'show_insider_var') and bool(self.show_insider_var.get()):
+                self._plot_insider_sales(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'show_insider_proposed_var') and bool(self.show_insider_proposed_var.get()):
+                self._plot_insider_proposed_sales(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
+        except Exception:
+            pass
+        self._render_markers(ax)
 
     def run_forecast(self):
         if self.df is None:
@@ -911,6 +963,9 @@ class App:
                 self._setup_hover(ax, series)
         except Exception:
             pass
+        self.last_act_df = act_ext
+        self.last_act_time_col = time_col
+        self.last_act_target = target_col if target_col in act_ext.columns else 'close'
         try:
             if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()):
                 self._plot_moon_markers(
@@ -923,6 +978,26 @@ class App:
                 )
         except Exception:
             pass
+        try:
+            if hasattr(self, 'show_earnings_var') and bool(self.show_earnings_var.get()):
+                try:
+                    print("Debug: plotting earnings overlay on forecast view", {"symbol": self.symbol_var.get().strip(), "rows": len(act_ext)})
+                except Exception:
+                    pass
+                self._plot_earnings_markers(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'show_insider_var') and bool(self.show_insider_var.get()):
+                self._plot_insider_sales(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'show_insider_proposed_var') and bool(self.show_insider_proposed_var.get()):
+                self._plot_insider_proposed_sales(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+        except Exception:
+            pass
+        self._render_markers(ax)
 
     def _setup_hover(self, ax, series_list):
         import numpy as np
@@ -959,6 +1034,7 @@ class App:
                         try:
                             ts = pd.to_datetime(xi)
                             ts_str = str(ts)
+                            self._hover_last_ts = ts
                         except Exception:
                             ts_str = str(xi)
                         lines.append(f"{label} @ {ts_str}: {yi}")
@@ -975,6 +1051,149 @@ class App:
         self._hover_cid = fig.canvas.mpl_connect('motion_notify_event', on_move)
         self._hover_vline = vline
         self._hover_annot = annot
+
+    def show_marker_dialog(self):
+        win = tk.Toplevel(self.root)
+        win.title("Add Marker")
+        frm = ttk.Frame(win)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        ttk.Label(frm, text="Date/Time (optional)").grid(row=0, column=0, sticky=tk.W)
+        dt_var = tk.StringVar()
+        dt_entry = ttk.Entry(frm, textvariable=dt_var, width=24)
+        dt_entry.grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(frm, text="Text").grid(row=1, column=0, sticky=tk.W)
+        txt_var = tk.StringVar()
+        txt_entry = ttk.Entry(frm, textvariable=txt_var, width=32)
+        txt_entry.grid(row=1, column=1, sticky=tk.W)
+        ttk.Label(frm, text="Series").grid(row=2, column=0, sticky=tk.W)
+        series_var = tk.StringVar(value="Actual")
+        series_cb = ttk.Combobox(frm, textvariable=series_var, values=["Actual","Forecast"], width=12)
+        series_cb.grid(row=2, column=1, sticky=tk.W)
+        def start_click():
+            # Update persistent marker inputs, then enable click mode
+            self.marker_series_var.set(series_var.get())
+            self.marker_text_var.set(txt_var.get().strip())
+            self._toggle_marker_mode(force_on=True)
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        ttk.Button(frm, text="Click On Chart To Place", command=start_click).grid(row=3, column=0, columnspan=2, pady=6)
+
+    def place_marker(self, dt_text, text, series, ts_override=None):
+        try:
+            ts = ts_override if ts_override is not None else (pd.to_datetime(dt_text, errors="coerce") if dt_text else getattr(self, '_hover_last_ts', None))
+        except Exception:
+            self.status_var.set("Invalid date/time for marker")
+            return
+        ax = self.figure.gca() if self.figure else None
+        if ax is None:
+            self.status_var.set("No plot available")
+            return
+        if ts is None:
+            self.status_var.set("No cursor position or date provided")
+            return
+        if series == "Forecast" and self.last_fcst_df is not None and self.last_time_col:
+            idx = pd.DatetimeIndex(pd.to_datetime(self.last_fcst_df.index if self.last_time_col not in self.last_fcst_df.columns else self.last_fcst_df[self.last_time_col]).dropna().sort_values())
+            i = idx.get_indexer([ts], method='pad')
+            if len(i) and i[0] >= 0:
+                ts_adj = idx[i[0]]
+                try:
+                    y = self.last_fcst_df.loc[ts_adj][self.last_target_col] if self.last_target_col in self.last_fcst_df.columns else self.last_fcst_df.loc[ts_adj]['close']
+                except Exception:
+                    y = None
+            else:
+                ts_adj = None
+                y = None
+        else:
+            if self.last_act_df is None or self.last_act_time_col is None:
+                self.status_var.set("No actual series available")
+                return
+            tcol = self.last_act_time_col
+            idx = pd.DatetimeIndex(pd.to_datetime(self.last_act_df[tcol]).dropna().sort_values())
+            i = idx.get_indexer([ts], method='pad')
+            if len(i) and i[0] >= 0:
+                ts_adj = idx[i[0]]
+                try:
+                    y = self.last_act_df.loc[self.last_act_df[tcol] == ts_adj][self.last_act_target].iloc[0]
+                except Exception:
+                    y = None
+            else:
+                ts_adj = None
+                y = None
+        if ts_adj is None or y is None:
+            self.status_var.set("Marker not placed: no matching timestamp")
+            return
+        ax.scatter([ts_adj], [y], s=40, color="#2ca02c", marker="o")
+        if text:
+            ax.annotate(text, (ts_adj, y), xytext=(8, -8), textcoords="offset points")
+        if bool(self.show_marker_vlines_var.get()):
+            try:
+                ax.axvline(x=ts_adj, color="#2ca02c", alpha=0.3)
+            except Exception:
+                pass
+        self.canvas.draw_idle()
+        try:
+            self.markers.append((ts_adj, y, text, series))
+        except Exception:
+            pass
+
+    def _render_markers(self, ax):
+        if ax is None or not self.markers:
+            return
+        if bool(self.show_marker_vlines_var.get()):
+            for ts_adj, y, text, series in self.markers:
+                try:
+                    ax.axvline(x=ts_adj, color="#2ca02c", alpha=0.3)
+                except Exception:
+                    continue
+
+    def _toggle_marker_mode(self, force_on=False):
+        on = force_on or bool(self.marker_mode_var.get())
+        if on:
+            self._enable_marker_click()
+        else:
+            self._disable_marker_click()
+
+    def _enable_marker_click(self):
+        fig = self.figure
+        if fig is None:
+            self.status_var.set("No plot available")
+            return
+        def on_click(event):
+            if event.inaxes is None or event.xdata is None:
+                return
+            try:
+                from matplotlib.dates import num2date
+                dt = num2date(event.xdata)
+                if getattr(dt, 'tzinfo', None) is not None:
+                    dt = dt.replace(tzinfo=None)
+                ts = pd.to_datetime(dt)
+            except Exception:
+                return
+            try:
+                self.place_marker("", self.marker_text_var.get().strip(), self.marker_series_var.get(), ts_override=ts)
+            except Exception:
+                pass
+        try:
+            if self._marker_click_cid:
+                fig.canvas.mpl_disconnect(self._marker_click_cid)
+        except Exception:
+            pass
+        self._marker_click_cid = fig.canvas.mpl_connect('button_press_event', on_click)
+        self.status_var.set("Marker mode: click on chart to add markers")
+
+    def _disable_marker_click(self):
+        fig = self.figure
+        if fig is None:
+            return
+        try:
+            if self._marker_click_cid:
+                fig.canvas.mpl_disconnect(self._marker_click_cid)
+        except Exception:
+            pass
+        self._marker_click_cid = None
+        self.status_var.set("Marker mode off")
 
     def _compute_moon_dates(self, start_ts, end_ts):
         import ephem
@@ -1080,6 +1299,606 @@ class App:
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
+    def _plot_earnings_markers(self, ax, df, time_col, target_col, symbol):
+        try:
+            print("Debug: _plot_earnings_markers called", {"symbol": symbol, "time_col": time_col, "target_col": target_col, "df_rows": 0 if df is None else len(df)})
+        except Exception:
+            pass
+        if not symbol or df is None or df.empty:
+            try:
+                print("Debug: earnings early-exit", {"has_symbol": bool(symbol), "df_empty": (df is None or df.empty)})
+            except Exception:
+                pass
+            return
+        try:
+            import yfinance as yf
+            import pandas as pd
+        except Exception:
+            return
+        try:
+            idx = pd.DatetimeIndex(pd.to_datetime(df[time_col]).dropna().sort_values())
+            start = idx.min()
+            end = idx.max()
+        except Exception:
+            return
+        try:
+            print("Debug: earnings range", {"start": str(start), "end": str(end), "index_len": len(idx)})
+        except Exception:
+            pass
+        dates = pd.Series([], dtype='datetime64[ns]')
+        surprise_map = {}
+        try:
+            tk = yf.Ticker(symbol.strip().upper())
+            cal = tk.get_earnings_dates(limit=100)
+            if cal is not None and len(cal) > 0:
+                if hasattr(cal, 'columns') and 'Earnings Date' in list(cal.columns):
+                    dates = pd.to_datetime(cal['Earnings Date'], utc=True).tz_convert(None)
+                elif hasattr(cal, 'index'):
+                    dates = pd.to_datetime(cal.index, utc=True).tz_convert(None)
+            if not dates.empty:
+                try:
+                    print("Earnings (yfinance):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                except Exception:
+                    pass
+            if dates.empty:
+                try:
+                    cal2 = tk.calendar
+                except Exception:
+                    cal2 = None
+                parsed_cal = []
+                try:
+                    if cal2:
+                        if isinstance(cal2, dict):
+                            ed = cal2.get('Earnings Date')
+                            if ed:
+                                if isinstance(ed, (list, tuple)):
+                                    for d in ed:
+                                        try:
+                                            parsed_cal.append(pd.to_datetime(d, utc=True))
+                                        except Exception:
+                                            pass
+                                else:
+                                    try:
+                                        parsed_cal.append(pd.to_datetime(ed, utc=True))
+                                    except Exception:
+                                        pass
+                        else:
+                            try:
+                                dfc = pd.DataFrame(cal2).T
+                                if 'Earnings Date' in dfc.columns:
+                                    vals = dfc['Earnings Date'].values.tolist()
+                                    for d in vals:
+                                        try:
+                                            parsed_cal.append(pd.to_datetime(d, utc=True))
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                except Exception:
+                    parsed_cal = []
+                if parsed_cal:
+                    try:
+                        dates = pd.to_datetime(parsed_cal, utc=True).tz_convert(None)
+                        print("Earnings (yfinance calendar):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                    except Exception:
+                        pass
+            try:
+                edf = tk.earnings_dates
+            except Exception:
+                edf = None
+            if edf is not None and hasattr(edf, 'index') and len(edf) > 0:
+                try:
+                    idx_dates = pd.to_datetime(edf.index, utc=True).tz_convert(None)
+                    try:
+                        print("Earnings (yfinance table):", [d.strftime("%Y-%m-%d") for d in idx_dates.tolist()])
+                    except Exception:
+                        pass
+                    try:
+                        if 'Surprise(%)' in edf.columns:
+                            s = pd.to_numeric(edf['Surprise(%)'], errors='coerce')
+                            for ts, val in zip(idx_dates.tolist(), s.tolist()):
+                                if pd.notna(val):
+                                    surprise_map[pd.to_datetime(ts)] = float(val)
+                            print("Debug: earnings surprises from yfinance table", {"count": len(surprise_map)})
+                        # Fallback: compute Surprise(%) if missing using Reported and Estimate
+                        if len(surprise_map) == 0:
+                            est_col = None
+                            rep_col = None
+                            for c in ['EPS Estimate','Estimate','epsEstimate','estimatedEPS']:
+                                if c in edf.columns:
+                                    est_col = c
+                                    break
+                            for c in ['Reported EPS','Reported','reportedEPS','reported']:
+                                if c in edf.columns:
+                                    rep_col = c
+                                    break
+                            if est_col and rep_col:
+                                est = pd.to_numeric(edf[est_col], errors='coerce')
+                                rep = pd.to_numeric(edf[rep_col], errors='coerce')
+                                surp = ((rep - est) / est * 100.0)
+                                for ts, val in zip(idx_dates.tolist(), surp.tolist()):
+                                    if pd.notna(val):
+                                        surprise_map[pd.to_datetime(ts)] = float(val)
+                                print("Debug: earnings surprises computed from table", {"count": len(surprise_map)})
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if dates.empty:
+            try:
+                import asyncio
+                import json
+                import urllib.request
+                req = urllib.request.Request(
+                    url="http://127.0.0.1:8088/tool/get_earnings_dates",
+                    data=json.dumps({"symbol": symbol.strip().upper(), "limit": 100}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    body = resp.read()
+                    obj = json.loads(body.decode("utf-8"))
+                    data = obj.get("data", [])
+                    parsed_local = []
+                    parsed_surp = []
+                    for item in data:
+                        d = item.get("date") if isinstance(item, dict) else item
+                        if d:
+                            try:
+                                parsed_local.append(pd.to_datetime(d, utc=True))
+                            except Exception:
+                                pass
+                        if isinstance(item, dict):
+                            for k in ["Surprise(%)", "surprise", "Surprise"]:
+                                if k in item and item[k] is not None:
+                                    try:
+                                        parsed_surp.append((pd.to_datetime(d, utc=True), float(item[k])))
+                                        break
+                                    except Exception:
+                                        pass
+                            # Fallback compute from estimate/reported if surprise not explicitly provided
+                            if not any(k in item for k in ["Surprise(%)", "surprise", "Surprise"]):
+                                # Try multiple key aliases
+                                est = None
+                                rep = None
+                                for kc in ["EPS Estimate","Estimate","epsEstimate","estimatedEPS"]:
+                                    if kc in item and item[kc] is not None:
+                                        try:
+                                            est = float(item[kc])
+                                            break
+                                        except Exception:
+                                            pass
+                                for kc in ["Reported EPS","Reported","reportedEPS","reported"]:
+                                    if kc in item and item[kc] is not None:
+                                        try:
+                                            rep = float(item[kc])
+                                            break
+                                        except Exception:
+                                            pass
+                                try:
+                                    if est is not None and rep is not None and est != 0:
+                                        val = (rep - est) / est * 100.0
+                                        parsed_surp.append((pd.to_datetime(d, utc=True), val))
+                                except Exception:
+                                    pass
+                    if parsed_local:
+                        dates = pd.to_datetime(parsed_local, utc=True).tz_convert(None)
+                        try:
+                            print("Earnings (MCP HTTP):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                        except Exception:
+                            pass
+                    if parsed_surp:
+                        try:
+                            for ts, val in parsed_surp:
+                                surprise_map[pd.to_datetime(ts).tz_convert(None)] = val
+                            print("Debug: earnings surprises from MCP HTTP", {"count": len(parsed_surp)})
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        if dates.empty:
+            try:
+                import os
+                import sys
+                import asyncio
+                try:
+                    from spoonos_stock_agent import MCPClient
+                except ImportError:
+                    candidates = [
+                        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "spoon-core-jue")),
+                        r"C:\\Users\\juesh\\jules\\spoon-core-jue",
+                        os.path.expanduser(r"~\\jules\\spoon-core-jue"),
+                    ]
+                    for p in candidates:
+                        if os.path.isdir(p) and p not in sys.path:
+                            sys.path.append(p)
+                    from spoonos_stock_agent import MCPClient
+                async def fetch():
+                    client = MCPClient(server_name="stock-mcp")
+                    tools = [
+                        "get_earnings_dates",
+                        "get_stock_earnings_calendar",
+                        "get_earnings_calendar",
+                        "get_company_events",
+                    ]
+                    for t in tools:
+                        try:
+                            res = await client.call_tool(t, {"symbol": symbol.strip().upper()})
+                            if isinstance(res, dict):
+                                data = res.get("data")
+                                if data:
+                                    return data
+                        except Exception:
+                            continue
+                    return []
+                raw = asyncio.run(fetch())
+                parsed = []
+                if isinstance(raw, list):
+                    for item in raw:
+                        if isinstance(item, dict):
+                            for k in ["date", "earningsDate", "reportedDate", "datetime", "time"]:
+                                if k in item and item[k]:
+                                    try:
+                                        parsed.append(pd.to_datetime(item[k], utc=True))
+                                        break
+                                    except Exception:
+                                        pass
+                        else:
+                            try:
+                                parsed.append(pd.to_datetime(item, utc=True))
+                            except Exception:
+                                pass
+                if parsed:
+                    dates = pd.to_datetime(parsed, utc=True).tz_convert(None)
+                    try:
+                        print("Earnings (MCP client):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                    except Exception:
+                        pass
+                try:
+                    self.status_var.set(f"Earnings (MCP): {len(dates)} dates fetched")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        total = len(dates)
+        try:
+            print("Debug: earnings fetched total", {"count": total})
+        except Exception:
+            pass
+        dates_full = dates.copy()
+        dates = dates[(dates >= start) & (dates <= end)]
+        try:
+            print("Debug: earnings in-range", {"count": len(dates)})
+        except Exception:
+            pass
+        if dates.empty:
+            try:
+                self.status_var.set(f"Earnings: {total} fetched, 0 in current range")
+            except Exception:
+                pass
+            return
+        def adjust(dt):
+            i = idx.get_indexer([pd.to_datetime(dt)], method='pad')
+            if len(i) and i[0] >= 0:
+                return idx[i[0]]
+            return None
+        df_map = df.copy()
+        df_map[time_col] = pd.to_datetime(df_map[time_col])
+        df_map = df_map.dropna(subset=[time_col, target_col]) if target_col in df_map.columns else df_map.dropna(subset=[time_col])
+        try:
+            print("Debug: earnings df_map", {"rows": len(df_map), "has_target": target_col in df_map.columns})
+        except Exception:
+            pass
+        xs = []
+        ys = []
+        mapped = 0
+        unmapped = 0
+        surprises = []
+        for d in dates:
+            a = adjust(d)
+            if a is not None:
+                try:
+                    yv = df_map.loc[df_map[time_col] == a, target_col].iloc[0]
+                except Exception:
+                    yv = None
+                xs.append(a)
+                ys.append(yv)
+                mapped += 1
+                try:
+                    dn = pd.to_datetime(d)
+                    if getattr(dn, 'tzinfo', None) is not None:
+                        dn = dn.tz_convert(None)
+                    sv = surprise_map.get(pd.to_datetime(dn))
+                except Exception:
+                    sv = None
+                surprises.append(sv)
+            else:
+                unmapped += 1
+        try:
+            print("Debug: earnings mapping", {"mapped": mapped, "unmapped": unmapped, "xs": len(xs), "ys": len(ys)})
+        except Exception:
+            pass
+        if xs:
+            try:
+                pts_x = [x for x, y in zip(xs, ys) if y is not None]
+                pts_y = [y for y in ys if y is not None]
+                try:
+                    print("Debug: earnings scatter points", {"scatter_count": len(pts_x)})
+                except Exception:
+                    pass
+                if pts_x:
+                    ax.scatter(pts_x, pts_y, s=30, color="#ff9900", label="Earnings")
+                    try:
+                        ann = [(x, y, s) for x, y, s in zip(xs, ys, surprises) if y is not None and s is not None]
+                        for x, y, s in ann:
+                            offs = 10 if s >= 0 else -12
+                            ax.annotate(f"{s:.2f}%", (x, y), xytext=(0, offs), textcoords="offset points", color=("#2ca02c" if s >= 0 else "#d62728"))
+                        print("Debug: earnings surprises annotated", {"count": len(ann)})
+                    except Exception:
+                        pass
+                if bool(self.show_marker_vlines_var.get()):
+                    try:
+                        print("Debug: earnings vlines", {"vline_count": len(xs)})
+                    except Exception:
+                        pass
+                    for x in xs:
+                        ax.axvline(x=x, color="#ff0000", alpha=0.8)
+                handles, labels = ax.get_legend_handles_labels()
+                ax.legend(handles, labels, loc="best")
+                try:
+                    self.status_var.set(f"Earnings: plotted {len(xs)} markers (scatter {len(pts_x)})")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            upcoming = dates_full[dates_full > end]
+            if len(upcoming) > 0:
+                next_dt = pd.to_datetime(upcoming.min())
+                try:
+                    ax.axvline(x=next_dt, color="#ff0000", alpha=0.8, linestyle="--")
+                except Exception:
+                    pass
+                try:
+                    from matplotlib.dates import date2num
+                    l, r = ax.get_xlim()
+                    nx = date2num(next_dt)
+                    if nx > r:
+                        ax.set_xlim(l, nx)
+                    print("Debug: upcoming earnings vline", {"date": str(next_dt)})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _fetch_insider_sales(self, symbol):
+        try:
+            import yfinance as yf
+            import pandas as pd
+            import requests
+            from io import StringIO
+        except Exception:
+            return None
+        df = None
+        try:
+            ticker = yf.Ticker(symbol.strip().upper())
+            df = ticker.insider_transactions
+        except Exception:
+            df = None
+        if df is None or len(df) == 0:
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                url = f"https://finviz.com/quote.ashx?t={symbol.strip().upper()}&p=d"
+                resp = requests.get(url, headers=headers, timeout=15)
+                resp.raise_for_status()
+                tables = pd.read_html(StringIO(resp.text))
+                target = None
+                for table in tables:
+                    if isinstance(table.columns, pd.MultiIndex):
+                        table.columns = table.columns.get_level_values(-1)
+                    if 'Insider Trading' in table.columns:
+                        target = table
+                        break
+                if target is None:
+                    return None
+                rename_map = {
+                    'Insider Trading': 'Who',
+                    'Relationship': 'Relationship',
+                    'Date': 'Date',
+                    'Transaction': 'TransactionText',
+                    'Cost': 'Cost',
+                    '#Shares': 'Shares',
+                    '# Shares': 'Shares',
+                    'Value ($)': 'Value'
+                }
+                df = target.rename(columns={k: v for k, v in rename_map.items() if k in target.columns})
+                required_cols = {'Date', 'Who', 'TransactionText', 'Shares', 'Value', 'Cost'}
+                if not required_cols.issubset(df.columns):
+                    return None
+                df['TransactionText'] = df['TransactionText'].astype(str)
+                df = df[df['TransactionText'].str.contains("Sale", case=False, na=False)].copy()
+                if df.empty:
+                    return None
+                df['Date'] = pd.to_datetime(df['Date'], format="%b %d '%y", errors='coerce')
+                df['Shares'] = pd.to_numeric(df['Shares'].astype(str).str.replace(',', ''), errors='coerce')
+                df['Value'] = pd.to_numeric(df['Value'].astype(str).str.replace(',', ''), errors='coerce')
+                df['Cost'] = pd.to_numeric(df['Cost'].astype(str).str.replace(',', ''), errors='coerce')
+                df.dropna(subset=['Date', 'Shares', 'Value', 'Cost'], inplace=True)
+            except Exception:
+                return None
+            return df[['Date', 'Who', 'TransactionText', 'Cost', 'Shares', 'Value']].sort_values('Date')
+        try:
+            df = df.reset_index()
+            rename_map = {
+                'Start Date': 'Date',
+                'Insider': 'Who',
+                'Transaction': 'TransactionType',
+                'Text': 'TransactionText',
+                'Value': 'TotalValue',
+                '#Shares': 'Shares'
+            }
+            df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+            cols = [c for c in ('TransactionType', 'TransactionText', 'Transaction') if c in df.columns]
+            if not cols:
+                return None
+            sale_mask = pd.Series(False, index=df.index)
+            for c in cols:
+                sale_mask |= df[c].astype(str).str.contains("Sale", case=False, na=False)
+            sdf = df[sale_mask].copy()
+            if sdf.empty:
+                return None
+            sdf['Date'] = pd.to_datetime(sdf['Date'])
+            sdf['Shares'] = pd.to_numeric(sdf['Shares'], errors='coerce')
+            if 'TotalValue' in sdf.columns:
+                sdf['TotalValue'] = pd.to_numeric(sdf['TotalValue'], errors='coerce')
+            sdf = sdf[sdf['Shares'] > 0]
+            if 'TotalValue' in sdf.columns:
+                sdf['Cost'] = sdf['TotalValue'] / sdf['Shares']
+                sdf.rename(columns={'TotalValue': 'Value'}, inplace=True)
+            else:
+                if 'Cost' in sdf.columns:
+                    sdf['Value'] = sdf['Cost'] * sdf['Shares']
+            sdf = sdf.dropna(subset=['Date', 'Shares'])
+            sdf = sdf.sort_values('Date')
+            return sdf[['Date', 'Who', 'TransactionText' if 'TransactionText' in sdf.columns else 'Transaction', 'Cost', 'Shares', 'Value']].rename(columns={'TransactionText': 'Transaction'})
+        except Exception:
+            return None
+
+    def _plot_insider_sales(self, ax, df, time_col, target_col, symbol):
+        print("Debug: _plot_insider_sales called", {"symbol": symbol, "time_col": time_col, "target_col": target_col, "df_rows": 0 if df is None else len(df)})
+        if df is None or df.empty:
+            return
+        if not symbol:
+            try:
+                if 'unique_id' in df.columns:
+                    vals = [str(v).strip() for v in df['unique_id'].dropna().tolist() if str(v).strip()]
+                    symbol = vals[0] if vals else symbol
+            except Exception:
+                pass
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            try:
+                self.status_var.set("Insider: no symbol set; skip")
+            except Exception:
+                pass
+            return
+        try:
+            print("Debug: fetching insider sales for", symbol)
+            sales = self._fetch_insider_sales(symbol)
+            try:
+                print("Debug: fetched insider rows", 0 if sales is None else len(sales))
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.status_var.set(f"Insider: error fetching for {symbol}: {e}")
+            except Exception:
+                pass
+            sales = None
+        if sales is None or sales.empty:
+            try:
+                self.status_var.set(f"Insider: no sales for {symbol}")
+            except Exception:
+                pass
+            return
+        total_count = len(sales)
+        df_sorted = df.copy()
+        df_sorted[time_col] = pd.to_datetime(df_sorted[time_col])
+        df_sorted = df_sorted.dropna(subset=[time_col])
+        df_sorted = df_sorted.sort_values(time_col)
+        idx = pd.DatetimeIndex(df_sorted[time_col].values)
+        start = idx.min()
+        end = idx.max()
+        sales_full = sales.copy()
+        sales = sales[(sales_full['Date'] >= start) & (sales_full['Date'] <= end)]
+        if sales.empty:
+            try:
+                self.status_var.set(f"Insider: fetched {total_count} total, 0 in range")
+            except Exception:
+                pass
+            return
+        def adjust(dt):
+            i = idx.get_indexer([pd.to_datetime(dt)], method='pad')
+            if len(i) and i[0] >= 0:
+                return i[0]
+            return None
+        xs = []
+        ys = []
+        sizes = []
+        vals = pd.to_numeric(sales.get('Value', pd.Series([0]*len(sales))), errors='coerce').fillna(0.0)
+        vmax = float(vals.max()) if len(vals) else 0.0
+        mapped = 0
+        for _, row in sales.iterrows():
+            pos = adjust(row['Date'])
+            if pos is not None and pos >= 0 and pos < len(df_sorted):
+                ts_adj = idx[pos]
+                xs.append(ts_adj)
+                try:
+                    yv = (pd.to_numeric(df_sorted[target_col], errors='coerce') if target_col in df_sorted.columns else pd.to_numeric(df_sorted['close'], errors='coerce')).iloc[pos]
+                except Exception:
+                    yv = None
+                ys.append(yv)
+                if vmax > 0:
+                    sizes.append(50 + 400 * (row.get('Value', 0.0) / vmax))
+                else:
+                    sizes.append(80)
+                mapped += 1
+        pts_x = [x for x, y in zip(xs, ys) if y is not None]
+        pts_y = [y for y in ys if y is not None]
+        pts_s = [s for s, y in zip(sizes, ys) if y is not None]
+        try:
+            if pts_x:
+                print("Debug: plotting insider scatter points", len(pts_x))
+                ax.scatter(pts_x, pts_y, s=pts_s, color="#8c564b", edgecolors="black", alpha=0.8, label="Insider Sales")
+            if bool(self.show_marker_vlines_var.get()):
+                print("Debug: plotting insider vlines", len(xs))
+                for x in xs:
+                    ax.axvline(x=x, color="#8c564b", alpha=0.25)
+            handles, labels = ax.get_legend_handles_labels()
+            ax.legend(handles, labels, loc="best")
+        except Exception as e:
+            print("Debug: plotting insider failed", str(e))
+        # Only real sales plotted here; proposed handled separately
+        try:
+            self.status_var.set(f"Insider: fetched {total_count} total, mapped {mapped} in range, plotted {len(xs)} markers (scatter {len(pts_x)})")
+            print("Insider debug:", {"symbol": symbol, "total": total_count, "in_range": mapped, "markers": len(xs), "scatter": len(pts_x)})
+        except Exception:
+            pass
+
+    def _on_overlay_toggle(self):
+        try:
+            print("Debug: overlay toggled", {
+                "earnings": bool(self.show_earnings_var.get()),
+                "insider": bool(self.show_insider_var.get()),
+                "insider_proposed": bool(self.show_insider_proposed_var.get()),
+                "full_moon": bool(self.show_full_moon_var.get()),
+                "new_moon": bool(self.show_new_moon_var.get()),
+            })
+        except Exception:
+            pass
+        try:
+            if self.last_fcst_df is not None:
+                try:
+                    print("Debug: overlay refresh path", {"mode": "forecast"})
+                except Exception:
+                    pass
+                self.update_plot()
+            else:
+                try:
+                    print("Debug: overlay refresh path", {"mode": "visualize"})
+                except Exception:
+                    pass
+                self.visualize_data()
+        except Exception as e:
+            try:
+                self.status_var.set(f"Overlay refresh failed: {e}")
+            except Exception:
+                pass
 def main():
     root = tk.Tk()
     app = App(root)
@@ -1087,3 +1906,608 @@ def main():
 
 if __name__ == "__main__":
     main()
+    def _plot_earnings_markers(self, ax, df, time_col, target_col, symbol):
+        if not symbol or df is None or df.empty:
+            return
+        try:
+            import yfinance as yf
+            import pandas as pd
+        except Exception:
+            return
+        try:
+            idx = pd.DatetimeIndex(pd.to_datetime(df[time_col]).dropna().sort_values())
+            start = idx.min()
+            end = idx.max()
+        except Exception:
+            return
+        # Primary source: yfinance
+        dates = pd.Series([], dtype='datetime64[ns]')
+        surprise_map = {}
+        try:
+            tk = yf.Ticker(symbol.strip().upper())
+            cal = tk.get_earnings_dates(limit=100)
+            if cal is not None and len(cal) > 0:
+                if hasattr(cal, 'columns') and 'Earnings Date' in list(cal.columns):
+                    dates = pd.to_datetime(cal['Earnings Date'], utc=True).tz_convert(None)
+                elif hasattr(cal, 'index'):
+                    dates = pd.to_datetime(cal.index, utc=True).tz_convert(None)
+            if not dates.empty:
+                try:
+                    print("Earnings (yfinance):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                except Exception:
+                    pass
+            if dates.empty:
+                try:
+                    cal2 = tk.calendar
+                except Exception:
+                    cal2 = None
+                parsed_cal = []
+                try:
+                    if cal2:
+                        if isinstance(cal2, dict):
+                            ed = cal2.get('Earnings Date')
+                            if ed:
+                                if isinstance(ed, (list, tuple)):
+                                    for d in ed:
+                                        try:
+                                            parsed_cal.append(pd.to_datetime(d, utc=True))
+                                        except Exception:
+                                            pass
+                                else:
+                                    try:
+                                        parsed_cal.append(pd.to_datetime(ed, utc=True))
+                                    except Exception:
+                                        pass
+                        else:
+                            try:
+                                dfc = pd.DataFrame(cal2).T
+                                if 'Earnings Date' in dfc.columns:
+                                    vals = dfc['Earnings Date'].values.tolist()
+                                    for d in vals:
+                                        try:
+                                            parsed_cal.append(pd.to_datetime(d, utc=True))
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass
+                except Exception:
+                    parsed_cal = []
+                if parsed_cal:
+                    try:
+                        dates = pd.to_datetime(parsed_cal, utc=True).tz_convert(None)
+                        print("Earnings (yfinance calendar):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                    except Exception:
+                        pass
+            try:
+                edf = tk.earnings_dates
+            except Exception:
+                edf = None
+            if edf is not None and hasattr(edf, 'index') and len(edf) > 0:
+                try:
+                    idx_dates = pd.to_datetime(edf.index, utc=True).tz_convert(None)
+                    try:
+                        print("Earnings (yfinance table):", [d.strftime("%Y-%m-%d") for d in idx_dates.tolist()])
+                    except Exception:
+                        pass
+                    try:
+                        if 'Surprise(%)' in edf.columns:
+                            s = pd.to_numeric(edf['Surprise(%)'], errors='coerce')
+                            for ts, val in zip(idx_dates.tolist(), s.tolist()):
+                                if pd.notna(val):
+                                    surprise_map[pd.to_datetime(ts)] = float(val)
+                        if len(surprise_map) == 0:
+                            est_col = None
+                            rep_col = None
+                            for c in ['EPS Estimate','Estimate','epsEstimate','estimatedEPS']:
+                                if c in edf.columns:
+                                    est_col = c
+                                    break
+                            for c in ['Reported EPS','Reported','reportedEPS','reported']:
+                                if c in edf.columns:
+                                    rep_col = c
+                                    break
+                            if est_col and rep_col:
+                                est = pd.to_numeric(edf[est_col], errors='coerce')
+                                rep = pd.to_numeric(edf[rep_col], errors='coerce')
+                                surp = ((rep - est) / est * 100.0)
+                                for ts, val in zip(idx_dates.tolist(), surp.tolist()):
+                                    if pd.notna(val):
+                                        surprise_map[pd.to_datetime(ts)] = float(val)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Fallback: MCP
+        if dates.empty:
+            try:
+                import asyncio
+                # Try local MCP server first (HTTP)
+                try:
+                    import json
+                    import urllib.request
+                    req = urllib.request.Request(
+                        url="http://127.0.0.1:8088/tool/get_earnings_dates",
+                        data=json.dumps({"symbol": symbol.strip().upper(), "limit": 100}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        body = resp.read()
+                        obj = json.loads(body.decode("utf-8"))
+                        data = obj.get("data", [])
+                        parsed_local = []
+                        parsed_surp = []
+                        for item in data:
+                            d = item.get("date") if isinstance(item, dict) else item
+                            if d:
+                                try:
+                                    parsed_local.append(pd.to_datetime(d, utc=True))
+                                except Exception:
+                                    pass
+                            if isinstance(item, dict):
+                                for k in ["Surprise(%)", "surprise", "Surprise"]:
+                                    if k in item and item[k] is not None:
+                                        try:
+                                            parsed_surp.append((pd.to_datetime(d, utc=True), float(item[k])))
+                                            break
+                                        except Exception:
+                                            pass
+                        if parsed_local:
+                            dates = pd.to_datetime(parsed_local, utc=True).tz_convert(None)
+                            try:
+                                print("Earnings (MCP HTTP):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                            except Exception:
+                                pass
+                        if parsed_surp:
+                            try:
+                                for ts, val in parsed_surp:
+                                    surprise_map[pd.to_datetime(ts).tz_convert(None)] = val
+                            except Exception:
+                                pass
+                        if parsed_surp:
+                            try:
+                                for ts, val in parsed_surp:
+                                    surprise_map[pd.to_datetime(ts).tz_convert(None)] = val
+                                print("Debug: earnings surprises from MCP HTTP", {"count": len(parsed_surp)})
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                try:
+                    from spoonos_stock_agent import MCPClient
+                except ImportError:
+                    candidates = [
+                        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "spoon-core-jue")),
+                        r"C:\\Users\\juesh\\jules\\spoon-core-jue",
+                        os.path.expanduser(r"~\\jules\\spoon-core-jue"),
+                    ]
+                    for p in candidates:
+                        if os.path.isdir(p) and p not in sys.path:
+                            sys.path.append(p)
+                    from spoonos_stock_agent import MCPClient
+                async def fetch():
+                    client = MCPClient(server_name="stock-mcp")
+                    tools = [
+                        "get_earnings_dates",
+                        "get_stock_earnings_calendar",
+                        "get_earnings_calendar",
+                        "get_company_events",
+                    ]
+                    for t in tools:
+                        try:
+                            res = await client.call_tool(t, {"symbol": symbol.strip().upper()})
+                            if isinstance(res, dict):
+                                data = res.get("data")
+                                if data:
+                                    return data
+                        except Exception:
+                            continue
+                    return []
+                raw = asyncio.run(fetch())
+                parsed = []
+                if isinstance(raw, list):
+                    for item in raw:
+                        if isinstance(item, dict):
+                            for k in ["date", "earningsDate", "reportedDate", "datetime", "time"]:
+                                if k in item and item[k]:
+                                    try:
+                                        parsed.append(pd.to_datetime(item[k], utc=True))
+                                        break
+                                    except Exception:
+                                        pass
+                        else:
+                            try:
+                                parsed.append(pd.to_datetime(item, utc=True))
+                            except Exception:
+                                pass
+                if parsed:
+                    dates = pd.to_datetime(parsed, utc=True).tz_convert(None)
+                    try:
+                        print("Earnings (MCP client):", [d.strftime("%Y-%m-%d") for d in dates.tolist()])
+                    except Exception:
+                        pass
+                try:
+                    self.status_var.set(f"Earnings (MCP): {len(dates)} dates fetched")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        total = len(dates)
+        dates_full = dates.copy()
+        dates = dates[(dates >= start) & (dates <= end)]
+        if dates.empty:
+            try:
+                self.status_var.set(f"Earnings: {total} fetched, 0 in current range")
+            except Exception:
+                pass
+            return
+        def adjust(dt):
+            i = idx.get_indexer([pd.to_datetime(dt)], method='pad')
+            if len(i) and i[0] >= 0:
+                return idx[i[0]]
+            return None
+        df_map = df.copy()
+        df_map[time_col] = pd.to_datetime(df_map[time_col])
+        df_map = df_map.dropna(subset=[time_col, target_col]) if target_col in df_map.columns else df_map.dropna(subset=[time_col])
+        xs = []
+        ys = []
+        surprises = []
+        for d in dates:
+            a = adjust(d)
+            if a is not None:
+                try:
+                    yv = df_map.loc[df_map[time_col] == a, target_col].iloc[0]
+                except Exception:
+                    yv = None
+                xs.append(a)
+                ys.append(yv)
+                try:
+                    dn = pd.to_datetime(d)
+                    if getattr(dn, 'tzinfo', None) is not None:
+                        dn = dn.tz_convert(None)
+                    sv = surprise_map.get(pd.to_datetime(dn))
+                except Exception:
+                    sv = None
+                surprises.append(sv)
+        if xs:
+            try:
+                # Scatter only for points with y-values
+                pts_x = [x for x, y in zip(xs, ys) if y is not None]
+                pts_y = [y for y in ys if y is not None]
+                if pts_x:
+                    ax.scatter(pts_x, pts_y, s=30, color="#ff9900", label="Earnings")
+                    try:
+                        ann = [(x, y, s) for x, y, s in zip(xs, ys, surprises) if y is not None and s is not None]
+                        for x, y, s in ann:
+                            offs = 10 if s >= 0 else -12
+                            ax.annotate(f"{s:.2f}%", (x, y), xytext=(0, offs), textcoords="offset points", color=("#2ca02c" if s >= 0 else "#d62728"))
+                    except Exception:
+                        pass
+                if bool(self.show_marker_vlines_var.get()):
+                    for x in xs:
+                        ax.axvline(x=x, color="#ff0000", alpha=0.8)
+                handles, labels = ax.get_legend_handles_labels()
+                ax.legend(handles, labels, loc="best")
+                try:
+                    self.status_var.set(f"Earnings: plotted {len(xs)} markers (scatter {len(pts_x)})")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        try:
+            upcoming = dates_full[dates_full > end]
+            if len(upcoming) > 0:
+                next_dt = pd.to_datetime(upcoming.min())
+                try:
+                    ax.axvline(x=next_dt, color="#ff0000", alpha=0.8, linestyle="--")
+                except Exception:
+                    pass
+                try:
+                    from matplotlib.dates import date2num
+                    l, r = ax.get_xlim()
+                    nx = date2num(next_dt)
+                    if nx > r:
+                        ax.set_xlim(l, nx)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _fetch_insider_sales(self, symbol):
+        try:
+            import yfinance as yf
+            import pandas as pd
+            import requests
+            from io import StringIO
+        except Exception:
+            return None
+        df = None
+        try:
+            ticker = yf.Ticker(symbol.strip().upper())
+            df = ticker.insider_transactions
+        except Exception:
+            df = None
+        if df is None or len(df) == 0:
+            # Finviz fallback (Sale entries)
+            try:
+                headers = {
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept-Language": "en-US,en;q=0.9",
+                }
+                url = f"https://finviz.com/quote.ashx?t={symbol.strip().upper()}&p=d"
+                resp = requests.get(url, headers=headers, timeout=15)
+                resp.raise_for_status()
+                import pandas as pd
+                tables = pd.read_html(StringIO(resp.text))
+                target = None
+                for table in tables:
+                    if isinstance(table.columns, pd.MultiIndex):
+                        table.columns = table.columns.get_level_values(-1)
+                    if 'Insider Trading' in table.columns:
+                        target = table
+                        break
+                if target is None:
+                    return None
+                rename_map = {
+                    'Insider Trading': 'Who',
+                    'Relationship': 'Relationship',
+                    'Date': 'Date',
+                    'Transaction': 'TransactionText',
+                    'Cost': 'Cost',
+                    '#Shares': 'Shares',
+                    '# Shares': 'Shares',
+                    'Value ($)': 'Value'
+                }
+                df = target.rename(columns={k: v for k, v in rename_map.items() if k in target.columns})
+                required_cols = {'Date', 'Who', 'TransactionText', 'Shares', 'Value', 'Cost'}
+                if not required_cols.issubset(df.columns):
+                    return None
+                df['TransactionText'] = df['TransactionText'].astype(str)
+                df = df[df['TransactionText'].str.contains("Sale", case=False, na=False)].copy()
+                if df.empty:
+                    return None
+                df['Date'] = pd.to_datetime(df['Date'], format="%b %d '%y", errors='coerce')
+                df['Shares'] = pd.to_numeric(df['Shares'].astype(str).str.replace(',', ''), errors='coerce')
+                df['Value'] = pd.to_numeric(df['Value'].astype(str).str.replace(',', ''), errors='coerce')
+                df['Cost'] = pd.to_numeric(df['Cost'].astype(str).str.replace(',', ''), errors='coerce')
+                df.dropna(subset=['Date', 'Shares', 'Value', 'Cost'], inplace=True)
+            except Exception:
+                return None
+            return df[['Date', 'Who', 'TransactionText', 'Cost', 'Shares', 'Value']].sort_values('Date')
+        # yfinance format
+        try:
+            import pandas as pd
+            df = df.reset_index()
+            rename_map = {
+                'Start Date': 'Date',
+                'Insider': 'Who',
+                'Transaction': 'TransactionType',
+                'Text': 'TransactionText',
+                'Value': 'TotalValue',
+                '#Shares': 'Shares'
+            }
+            df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+            # Filter Sales
+            cols = [c for c in ('TransactionType', 'TransactionText', 'Transaction') if c in df.columns]
+            if not cols:
+                return None
+            sale_mask = pd.Series(False, index=df.index)
+            for c in cols:
+                sale_mask |= df[c].astype(str).str.contains("Sale", case=False, na=False)
+            sdf = df[sale_mask].copy()
+            if sdf.empty:
+                return None
+            sdf['Date'] = pd.to_datetime(sdf['Date'])
+            sdf['Shares'] = pd.to_numeric(sdf['Shares'], errors='coerce')
+            if 'TotalValue' in sdf.columns:
+                sdf['TotalValue'] = pd.to_numeric(sdf['TotalValue'], errors='coerce')
+            # Derive Cost and Value
+            sdf = sdf[sdf['Shares'] > 0]
+            if 'TotalValue' in sdf.columns:
+                sdf['Cost'] = sdf['TotalValue'] / sdf['Shares']
+                sdf.rename(columns={'TotalValue': 'Value'}, inplace=True)
+            else:
+                # If per-share cost present, compute Value
+                if 'Cost' in sdf.columns:
+                    sdf['Value'] = sdf['Cost'] * sdf['Shares']
+            sdf = sdf.dropna(subset=['Date', 'Shares'])
+            sdf = sdf.sort_values('Date')
+            return sdf[['Date', 'Who', 'TransactionText' if 'TransactionText' in sdf.columns else 'Transaction', 'Cost', 'Shares', 'Value']].rename(columns={'TransactionText': 'Transaction'})
+        except Exception:
+            return None
+
+    def _plot_insider_sales(self, ax, df, time_col, target_col, symbol):
+        print("Debug: _plot_insider_sales called", {"symbol": symbol, "time_col": time_col, "target_col": target_col, "df_rows": 0 if df is None else len(df)})
+        if df is None or df.empty:
+            return
+        if not symbol:
+            try:
+                if 'unique_id' in df.columns:
+                    vals = [str(v).strip() for v in df['unique_id'].dropna().tolist() if str(v).strip()]
+                    symbol = vals[0] if vals else symbol
+            except Exception:
+                pass
+        symbol = (symbol or "").strip().upper()
+        if not symbol:
+            try:
+                self.status_var.set("Insider: no symbol set; skip")
+            except Exception:
+                pass
+            return
+        try:
+            print("Debug: fetching insider sales for", symbol)
+            sales = self._fetch_insider_sales(symbol)
+            try:
+                print("Debug: fetched insider rows", 0 if sales is None else len(sales))
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.status_var.set(f"Insider: error fetching for {symbol}: {e}")
+            except Exception:
+                pass
+            sales = None
+        if sales is None or sales.empty:
+            try:
+                self.status_var.set(f"Insider: no sales for {symbol}")
+            except Exception:
+                pass
+            return
+        total_count = len(sales)
+        df_sorted = df.copy()
+        df_sorted[time_col] = pd.to_datetime(df_sorted[time_col])
+        df_sorted = df_sorted.dropna(subset=[time_col])
+        df_sorted = df_sorted.sort_values(time_col)
+        idx = pd.DatetimeIndex(df_sorted[time_col].values)
+        start = idx.min()
+        end = idx.max()
+        sales_full = sales.copy()
+        sales = sales[(sales_full['Date'] >= start) & (sales_full['Date'] <= end)]
+        if sales.empty:
+            try:
+                self.status_var.set(f"Insider: fetched {total_count} total, 0 in range")
+            except Exception:
+                pass
+            return
+        def adjust(dt):
+            i = idx.get_indexer([pd.to_datetime(dt)], method='pad')
+            if len(i) and i[0] >= 0:
+                return i[0]
+            return None
+        xs = []
+        ys = []
+        sizes = []
+        vals = pd.to_numeric(sales.get('Value', pd.Series([0]*len(sales))), errors='coerce').fillna(0.0)
+        vmax = float(vals.max()) if len(vals) else 0.0
+        mapped = 0
+        for _, row in sales.iterrows():
+            pos = adjust(row['Date'])
+            if pos is not None and pos >= 0 and pos < len(df_sorted):
+                ts_adj = idx[pos]
+                xs.append(ts_adj)
+                try:
+                    yv = (pd.to_numeric(df_sorted[target_col], errors='coerce') if target_col in df_sorted.columns else pd.to_numeric(df_sorted['close'], errors='coerce')).iloc[pos]
+                except Exception:
+                    yv = None
+                ys.append(yv)
+                if vmax > 0:
+                    sizes.append(50 + 400 * (row.get('Value', 0.0) / vmax))
+                else:
+                    sizes.append(80)
+                mapped += 1
+        pts_x = [x for x, y in zip(xs, ys) if y is not None]
+        pts_y = [y for y in ys if y is not None]
+        pts_s = [s for s, y in zip(sizes, ys) if y is not None]
+        try:
+            if pts_x:
+                print("Debug: plotting insider scatter points", len(pts_x))
+                ax.scatter(pts_x, pts_y, s=pts_s, color="#8c564b", edgecolors="black", alpha=0.8, label="Insider Sales")
+            if bool(self.show_marker_vlines_var.get()):
+                print("Debug: plotting insider vlines", len(xs))
+                for x in xs:
+                    ax.axvline(x=x, color="#8c564b", alpha=0.25)
+            handles, labels = ax.get_legend_handles_labels()
+            ax.legend(handles, labels, loc="best")
+        except Exception as e:
+            print("Debug: plotting insider failed", str(e))
+        try:
+            upcoming = sales_full[sales_full['Date'] > end]
+            if len(upcoming) > 0:
+                for dt in upcoming['Date'].tolist():
+                    try:
+                        ax.axvline(x=pd.to_datetime(dt), color="#ff0000", alpha=0.8, linestyle="--")
+                    except Exception:
+                        continue
+                try:
+                    from matplotlib.dates import date2num
+                    l, r = ax.get_xlim()
+                    mx = date2num(pd.to_datetime(upcoming['Date'].max()))
+                    if mx > r:
+                        ax.set_xlim(l, mx)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self.status_var.set(f"Insider: fetched {total_count} total, mapped {mapped} in range, plotted {len(xs)} markers (scatter {len(pts_x)})")
+            print("Insider debug:", {"symbol": symbol, "total": total_count, "in_range": mapped, "markers": len(xs), "scatter": len(pts_x)})
+        except Exception:
+            pass
+    def _plot_insider_proposed_sales(self, ax, df, time_col, target_col, symbol):
+        try:
+            print("Debug: _plot_insider_proposed_sales called", {"symbol": symbol, "time_col": time_col, "target_col": target_col, "df_rows": 0 if df is None else len(df)})
+        except Exception:
+            pass
+        if ax is None or df is None or df.empty or not symbol:
+            return
+        try:
+            sales = self._fetch_insider_sales((symbol or "").strip().upper())
+        except Exception:
+            sales = None
+        if sales is None or sales.empty:
+            return
+        df_sorted = df.copy()
+        df_sorted[time_col] = pd.to_datetime(df_sorted[time_col], errors="coerce")
+        df_sorted = df_sorted.dropna(subset=[time_col]).sort_values(time_col)
+        idx = pd.DatetimeIndex(df_sorted[time_col].values)
+        if len(idx) == 0:
+            return
+        start = idx.min()
+        end = idx.max()
+        try:
+            txt_col = 'TransactionText' if 'TransactionText' in sales.columns else ('Transaction' if 'Transaction' in sales.columns else None)
+        except Exception:
+            txt_col = None
+        if txt_col is None:
+            return
+        try:
+            texts = sales[txt_col].astype(str)
+            key_any = texts.str.contains("Proposed|Planned|Plan|Intend|Filed|Form 144|10b5-1", case=False, na=False)
+            sale_any = texts.str.contains("Sale", case=False, na=False)
+            proposed = sales[key_any & sale_any].copy()
+        except Exception:
+            proposed = None
+        if proposed is None or proposed.empty:
+            return
+        try:
+            proposed['Date'] = pd.to_datetime(proposed['Date'], errors="coerce")
+            proposed = proposed.dropna(subset=['Date'])
+        except Exception:
+            return
+        in_range = proposed[(proposed['Date'] >= start) & (proposed['Date'] <= end)]
+        try:
+            for dt in in_range['Date'].tolist():
+                try:
+                    ax.axvline(x=pd.to_datetime(dt), color="#ff0000", alpha=0.8, linestyle="--")
+                except Exception:
+                    continue
+            try:
+                print("Debug: proposed insider vlines", {"count": len(in_range)})
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _on_overlay_toggle(self):
+        try:
+            print("Debug: overlay toggled", {
+                "earnings": bool(self.show_earnings_var.get()),
+                "insider": bool(self.show_insider_var.get()),
+                "full_moon": bool(self.show_full_moon_var.get()),
+                "new_moon": bool(self.show_new_moon_var.get()),
+            })
+        except Exception:
+            pass
+        # Re-render based on current context
+        try:
+            if self.last_fcst_df is not None:
+                self.update_plot()
+            else:
+                self.visualize_data()
+        except Exception as e:
+            try:
+                self.status_var.set(f"Overlay refresh failed: {e}")
+            except Exception:
+                pass
