@@ -113,6 +113,7 @@ class App:
         self.show_insider_var = tk.BooleanVar(value=False)
         self.show_insider_proposed_var = tk.BooleanVar(value=False)
         self.insider_tooltips_var = tk.BooleanVar(value=False)
+        self.show_volume_dot_var = tk.BooleanVar(value=False)
         self.show_insider_proposed_var = tk.BooleanVar(value=False)
         self._build_ui()
 
@@ -278,6 +279,8 @@ class App:
         self.insider_proposed_cb.grid(row=0, column=5, sticky=tk.W)
         self.insider_tooltips_cb = ttk.Checkbutton(g1, text="Insider Tooltips", variable=self.insider_tooltips_var, command=self._on_overlay_toggle)
         self.insider_tooltips_cb.grid(row=0, column=6, sticky=tk.W)
+        self.volume_dot_cb = ttk.Checkbutton(g1, text="Volume Dot Chart", variable=self.show_volume_dot_var, command=self._on_overlay_toggle)
+        self.volume_dot_cb.grid(row=0, column=7, sticky=tk.W)
         self.insider_proposed_cb = ttk.Checkbutton(g1, text="Show Proposed Insider Sales", variable=self.show_insider_proposed_var, command=self._on_overlay_toggle)
         self.insider_proposed_cb.grid(row=0, column=5, sticky=tk.W)
 
@@ -328,6 +331,7 @@ class App:
         self.add_tooltip(self.insider_cb, "Plot historical insider sale transactions; bubble size reflects transaction value.")
         self.add_tooltip(self.insider_proposed_cb, "Show proposed future insider sales as red dashed v-lines.")
         self.add_tooltip(self.insider_tooltips_cb, "Enable hover tooltips for insider sales with seller and % holdings sold when available.")
+        self.add_tooltip(self.volume_dot_cb, "Overlay dots sized by volume; green when close > open else red.")
         self.add_tooltip(self.h_entry, "Forecast horizon h (integer).")
         self.add_tooltip(self.display_start_entry, "Plot start time. Leave empty to auto.")
         self.add_tooltip(self.display_end_entry, "Plot end time. Leave empty to auto.")
@@ -781,6 +785,20 @@ class App:
                 self._plot_insider_proposed_sales(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
         except Exception:
             pass
+        try:
+            if hasattr(self, 'show_volume_dot_var') and bool(self.show_volume_dot_var.get()):
+                try:
+                    print("Debug: visualizing volume dot overlay", {"symbol": self.symbol_var.get().strip(), "rows": len(act_df)})
+                except Exception:
+                    pass
+                self._plot_volume_dot_overlay(ax, act_df, time_col, (target_col if target_col in act_df.columns else 'close'))
+                try:
+                    if hasattr(self, 'canvas') and self.canvas:
+                        self.canvas.draw()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self._render_markers(ax)
 
     def run_forecast(self):
@@ -1004,6 +1022,15 @@ class App:
                 self._plot_insider_proposed_sales(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
         except Exception:
             pass
+        try:
+            if hasattr(self, 'show_volume_dot_var') and bool(self.show_volume_dot_var.get()):
+                try:
+                    print("Debug: forecast volume dot overlay", {"symbol": self.symbol_var.get().strip(), "rows": len(act_ext)})
+                except Exception:
+                    pass
+                self._plot_volume_dot_overlay(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'))
+        except Exception:
+            pass
         self._render_markers(ax)
 
     def _setup_hover(self, ax, series_list):
@@ -1058,6 +1085,119 @@ class App:
         self._hover_cid = fig.canvas.mpl_connect('motion_notify_event', on_move)
         self._hover_vline = vline
         self._hover_annot = annot
+    def _plot_volume_dot_overlay(self, ax, df, time_col, target_col):
+        try:
+            print("Debug: _plot_volume_dot_overlay called", {
+                "enabled": bool(self.show_volume_dot_var.get()) if hasattr(self, "show_volume_dot_var") else None,
+                "time_col": time_col,
+                "target_col": target_col,
+                "df_rows": 0 if df is None else len(df),
+                "cols": [] if df is None else list(df.columns),
+            })
+            try:
+                import sys
+                sys.stdout.flush()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        if ax is None or df is None or df.empty or not time_col:
+            return
+        dfx = df.copy()
+        dfx[time_col] = pd.to_datetime(dfx[time_col], errors="coerce")
+        dfx = dfx.dropna(subset=[time_col])
+        candidates_close = [target_col, 'close', 'Close', 'Adj Close']
+        close_col = next((c for c in candidates_close if c and c in dfx.columns), None)
+        candidates_open = ['open', 'Open']
+        open_col = next((c for c in candidates_open if c in dfx.columns), None)
+        candidates_vol = ['volume', 'Volume', 'vol', 'Vol']
+        vol_col = next((c for c in candidates_vol if c in dfx.columns), None)
+        try:
+            print("Debug: volume dot columns resolved", {"close_col": close_col, "open_col": open_col, "vol_col": vol_col})
+        except Exception:
+            pass
+        if close_col is None or open_col is None or vol_col is None:
+            try:
+                self.status_var.set("Volume dot: required columns missing (need open/close/volume)")
+            except Exception:
+                pass
+            return
+        dfx[close_col] = pd.to_numeric(dfx[close_col], errors="coerce")
+        dfx[open_col] = pd.to_numeric(dfx[open_col], errors="coerce")
+        dfx[vol_col] = pd.to_numeric(dfx[vol_col], errors="coerce")
+        dfx = dfx.dropna(subset=[close_col, open_col, vol_col])
+        try:
+            print("Debug: volume dot row counts", {"rows_after_dropna": len(dfx)})
+        except Exception:
+            pass
+        x = dfx[time_col]
+        y = dfx[close_col]
+        try:
+            ax.plot(x, y, color="midnightblue", linewidth=1.3, alpha=0.85, label="Close trend")
+        except Exception:
+            pass
+        try:
+            colors = ['green' if float(c) > float(o) else 'red' for c, o in zip(dfx[close_col].tolist(), dfx[open_col].tolist())]
+            try:
+                gc = sum(1 for c in colors if c == 'green')
+                rc = sum(1 for c in colors if c == 'red')
+                print("Debug: volume dot colors", {"green": gc, "red": rc})
+            except Exception:
+                pass
+        except Exception:
+            colors = ['green'] * len(dfx)
+        try:
+            vols = []
+            for vv in dfx[vol_col].tolist():
+                try:
+                    vols.append(float(vv))
+                except Exception:
+                    vols.append(float("nan"))
+            vols_clean = [v for v in vols if v == v]
+            vmin = min(vols_clean) if vols_clean else 0.0
+            vmax = max(vols_clean) if vols_clean else 0.0
+            try:
+                print("Debug: volume dot sizes range", {"vmin": vmin, "vmax": vmax})
+            except Exception:
+                pass
+            sizes = []
+            lo, hi = 10.0, 80.0
+            if vmin == vmax:
+                sizes = [lo] * len(dfx)
+            else:
+                rng = (vmax - vmin)
+                for v in vols:
+                    if v != v:
+                        sizes.append(lo)
+                    else:
+                        sizes.append(lo + (v - vmin) / rng * (hi - lo))
+            try:
+                print("Debug: volume dot sizes sample", {"count": int(len(sizes)), "min": float(min(sizes) if sizes else 0.0), "max": float(max(sizes) if sizes else 0.0)})
+            except Exception:
+                pass
+        except Exception:
+            sizes = [10.0] * len(dfx)
+        try:
+            ax.scatter(x, y, s=sizes, c=colors, alpha=0.6, edgecolors="black", linewidth=0.5, label="Volume dots")
+            try:
+                handles, labels = ax.get_legend_handles_labels()
+                ax.legend(handles, labels, loc="best")
+            except Exception:
+                pass
+            try:
+                self.status_var.set(f"Volume dot: plotted {len(dfx)} points")
+                print("Debug: volume dot plotted", {"points": len(dfx)})
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'canvas') and self.canvas:
+                    self.canvas.draw()
+                else:
+                    ax.figure.canvas.draw_idle()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def show_marker_dialog(self):
         win = tk.Toplevel(self.root)
@@ -2128,6 +2268,7 @@ class App:
                 "insider": bool(self.show_insider_var.get()),
                 "insider_proposed": bool(self.show_insider_proposed_var.get()),
                 "insider_tooltips": bool(self.insider_tooltips_var.get()),
+                "volume_dot": bool(self.show_volume_dot_var.get()),
                 "full_moon": bool(self.show_full_moon_var.get()),
                 "new_moon": bool(self.show_new_moon_var.get()),
             })
@@ -2866,6 +3007,118 @@ if __name__ == "__main__":
                     continue
             try:
                 print("Debug: proposed insider vlines", {"count": len(in_range)})
+            except Exception:
+                pass
+        except Exception:
+            pass
+    def _plot_volume_dot_overlay(self, ax, df, time_col, target_col):
+        try:
+            print("Debug: _plot_volume_dot_overlay called", {
+                "enabled": bool(self.show_volume_dot_var.get()) if hasattr(self, "show_volume_dot_var") else None,
+                "time_col": time_col,
+                "target_col": target_col,
+                "df_rows": 0 if df is None else len(df),
+                "cols": [] if df is None else list(df.columns),
+            })
+            try:
+                import sys
+                sys.stdout.flush()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        if ax is None or df is None or df.empty or not time_col:
+            return
+        dfx = df.copy()
+        dfx[time_col] = pd.to_datetime(dfx[time_col], errors="coerce")
+        dfx = dfx.dropna(subset=[time_col])
+        # Resolve columns robustly across casing and common variants
+        candidates_close = [target_col, 'close', 'Close', 'Adj Close']
+        close_col = next((c for c in candidates_close if c and c in dfx.columns), None)
+        candidates_open = ['open', 'Open']
+        open_col = next((c for c in candidates_open if c in dfx.columns), None)
+        candidates_vol = ['volume', 'Volume', 'vol', 'Vol']
+        vol_col = next((c for c in candidates_vol if c in dfx.columns), None)
+        try:
+            print("Debug: volume dot columns resolved", {"close_col": close_col, "open_col": open_col, "vol_col": vol_col})
+        except Exception:
+            pass
+        if close_col is None or open_col is None or vol_col is None:
+            try:
+                self.status_var.set("Volume dot: required columns missing (need open/close/volume)")
+            except Exception:
+                pass
+            return
+        dfx[close_col] = pd.to_numeric(dfx[close_col], errors="coerce")
+        dfx[open_col] = pd.to_numeric(dfx[open_col], errors="coerce")
+        dfx[vol_col] = pd.to_numeric(dfx[vol_col], errors="coerce")
+        dfx = dfx.dropna(subset=[close_col, open_col, vol_col])
+        try:
+            print("Debug: volume dot row counts", {"rows_after_dropna": len(dfx)})
+        except Exception:
+            pass
+        x = dfx[time_col]
+        y = dfx[close_col]
+        try:
+            ax.plot(x, y, color="midnightblue", linewidth=1.3, alpha=0.85, label="Close trend")
+        except Exception:
+            pass
+        try:
+            colors = ['green' if float(c) > float(o) else 'red' for c, o in zip(dfx[close_col].tolist(), dfx[open_col].tolist())]
+            try:
+                gc = sum(1 for c in colors if c == 'green')
+                rc = sum(1 for c in colors if c == 'red')
+                print("Debug: volume dot colors", {"green": gc, "red": rc})
+            except Exception:
+                pass
+        except Exception:
+            colors = ['green'] * len(dfx)
+        try:
+            vols = []
+            for vv in dfx[vol_col].tolist():
+                try:
+                    vols.append(float(vv))
+                except Exception:
+                    vols.append(float("nan"))
+            # Filter NaNs
+            vols_clean = [v for v in vols if v == v]
+            vmin = min(vols_clean) if vols_clean else 0.0
+            vmax = max(vols_clean) if vols_clean else 0.0
+            try:
+                print("Debug: volume dot sizes range", {"vmin": vmin, "vmax": vmax})
+            except Exception:
+                pass
+            sizes = []
+            lo, hi = 10.0, 80.0
+            if vmin == vmax:
+                sizes = [lo] * len(dfx)
+            else:
+                rng = (vmax - vmin)
+                for v in vols:
+                    if v != v:
+                        sizes.append(lo)
+                    else:
+                        sizes.append(lo + (v - vmin) / rng * (hi - lo))
+            try:
+                print("Debug: volume dot sizes sample", {"count": int(len(sizes)), "min": float(min(sizes) if sizes else 0.0), "max": float(max(sizes) if sizes else 0.0)})
+            except Exception:
+                pass
+        except Exception:
+            sizes = [10.0] * len(dfx)
+        try:
+            sc = ax.scatter(x, y, s=sizes, c=colors, alpha=0.6, edgecolors="black", linewidth=0.5, label="Volume dots")
+            try:
+                handles, labels = ax.get_legend_handles_labels()
+                ax.legend(handles, labels, loc="best")
+            except Exception:
+                pass
+            try:
+                self.status_var.set(f"Volume dot: plotted {len(dfx)} points")
+                print("Debug: volume dot plotted", {"points": len(dfx)})
+            except Exception:
+                pass
+            try:
+                ax.figure.canvas.draw_idle()
             except Exception:
                 pass
         except Exception:

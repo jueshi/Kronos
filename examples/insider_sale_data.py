@@ -7,11 +7,15 @@ import time
 from pathlib import Path
 import requests
 from io import StringIO
+try:
+    import mplcursors
+except ImportError:
+    mplcursors = None
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-TICKER = "CRDO"  # Change this to ALAB, NVDA, etc.
+TICKER = "ALAB"  # Change this to ALAB, NVDA, etc.
 CACHE_DIR = Path(__file__).resolve().parent / "insider_cache"
 MAX_RETRIES = 3
 FINVIZ_URL = "https://finviz.com/quote.ashx?t={symbol}&p=d"
@@ -256,8 +260,33 @@ if sales_df is not None and not sales_df.empty:
     top_names = sales_df['Name'].value_counts().index[:6]
     sales_df['NameGroup'] = sales_df['Name'].apply(lambda x: x if x in top_names else 'Other')
 
+    # Pick the best available transaction descriptor for tooltips
+    transaction_fields = [
+        col for col in ('Transaction', 'TransactionType', 'TransactionText')
+        if col in sales_df.columns
+    ]
+
+    def _resolve_transaction(row):
+        for col in transaction_fields:
+            val = row.get(col)
+            if pd.notnull(val) and str(val).strip():
+                return str(val)
+        return "Sale"
+
+    if transaction_fields:
+        sales_df['TransactionDisplay'] = sales_df.apply(_resolve_transaction, axis=1)
+    else:
+        sales_df['TransactionDisplay'] = "Sale"
+
     # Create a proxy for Stock Price (Average transaction cost per day)
     price_trend = sales_df.groupby('Date')['Cost'].mean().reset_index()
+
+    # Ensure numeric Value before plotting/annotating
+    sales_df['Value'] = pd.to_numeric(sales_df['Value'])
+
+    # DataFrame used for plotting + tooltips
+    plot_df = sales_df[['Date', 'Cost', 'Value', 'NameGroup', 'Name', 'Who', 'Shares', 'TransactionDisplay']].copy()
+    plot_df.reset_index(drop=True, inplace=True)
 
     # --- Plotting ---
 
@@ -268,8 +297,8 @@ if sales_df is not None and not sales_df.empty:
              color='gray', alpha=0.4, linestyle='--', linewidth=1, label='Avg Transaction Price')
 
     # 2. Plot the Bubble Chart
-    sns.scatterplot(
-        data=sales_df, 
+    scatter = sns.scatterplot(
+        data=plot_df, 
         x='Date', 
         y='Cost', 
         size='Value',       # Bubble size = Transaction Value
@@ -281,8 +310,6 @@ if sales_df is not None and not sales_df.empty:
     )
 
     # 3. Annotate the largest transactions
-    # Ensure Value is numeric
-    sales_df['Value'] = pd.to_numeric(sales_df['Value'])
     top_transactions = sales_df.nlargest(4, 'Value')
     
     for idx, row in top_transactions.iterrows():
@@ -299,6 +326,30 @@ if sales_df is not None and not sales_df.empty:
                 fontweight='bold',
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.8)
             )
+
+    # Optional interactive tooltips for sellers, if mplcursors is installed
+    if mplcursors is not None:
+        cursor = mplcursors.cursor(scatter.collections[0], hover=True)
+
+        @cursor.connect("add")
+        def _add_tooltip(sel):
+            idx = sel.index
+            if idx is None or idx >= len(plot_df):
+                return
+            row = plot_df.iloc[idx]
+            shares = row['Shares']
+            value = row['Value']
+            sel.annotation.set_text(
+                f"{row['Name']} ({row['TransactionDisplay']})\n"
+                f"Official: {row['Who']}\n"
+                f"Date: {row['Date']:%b %d, %Y}\n"
+                f"Shares: {shares:,.0f}\n"
+                f"Value: ${value:,.0f}\n"
+                f"Price: ${row['Cost']:.2f}"
+            )
+            sel.annotation.get_bbox_patch().set(alpha=0.9)
+    else:
+        print("Install `mplcursors` to see hover tooltips identifying each seller.")
 
     # Formatting
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%b %d'))
