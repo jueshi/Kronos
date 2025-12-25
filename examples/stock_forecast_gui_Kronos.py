@@ -115,6 +115,7 @@ class App:
         self.insider_tooltips_var = tk.BooleanVar(value=False)
         self.show_volume_dot_var = tk.BooleanVar(value=False)
         self.show_insider_proposed_var = tk.BooleanVar(value=False)
+        self.show_pe_eps_var = tk.BooleanVar(value=False)
         self._build_ui()
 
         # Kronos initialization
@@ -283,6 +284,8 @@ class App:
         self.volume_dot_cb.grid(row=0, column=7, sticky=tk.W)
         self.insider_proposed_cb = ttk.Checkbutton(g1, text="Show Proposed Insider Sales", variable=self.show_insider_proposed_var, command=self._on_overlay_toggle)
         self.insider_proposed_cb.grid(row=0, column=5, sticky=tk.W)
+        self.pe_eps_cb = ttk.Checkbutton(g1, text="Show P/E & EPS", variable=self.show_pe_eps_var, command=self._on_overlay_toggle)
+        self.pe_eps_cb.grid(row=0, column=8, sticky=tk.W)
 
         g1b = ttk.Frame(frame)
         g1b.pack(fill=tk.X, padx=8)
@@ -332,9 +335,214 @@ class App:
         self.add_tooltip(self.insider_proposed_cb, "Show proposed future insider sales as red dashed v-lines.")
         self.add_tooltip(self.insider_tooltips_cb, "Enable hover tooltips for insider sales with seller and % holdings sold when available.")
         self.add_tooltip(self.volume_dot_cb, "Overlay dots sized by volume; green when close > open else red.")
+        self.add_tooltip(self.pe_eps_cb, "Overlay P/E ratio and EPS (TTM) using yfinance/SEC data.")
         self.add_tooltip(self.h_entry, "Forecast horizon h (integer).")
         self.add_tooltip(self.display_start_entry, "Plot start time. Leave empty to auto.")
         self.add_tooltip(self.display_end_entry, "Plot end time. Leave empty to auto.")
+
+    def _to_naive_datetime_index(self, index):
+        idx = pd.DatetimeIndex(index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        return idx
+
+    def _extract_eps_row(self, financials):
+        if financials is None or len(financials) == 0:
+            return None
+        candidates = ('Diluted EPS', 'Diluted EPS (USD)', 'Basic EPS', 'Basic EPS (USD)')
+        try:
+            for label in candidates:
+                if label in financials.index:
+                    row = financials.loc[label].dropna()
+                    if not row.empty:
+                        numeric_row = pd.to_numeric(row, errors='coerce').dropna()
+                        if not numeric_row.empty:
+                            return numeric_row
+        except Exception:
+            return None
+        return None
+
+    def _compute_eps_series(self, symbol):
+        try:
+            import yfinance as yf
+        except Exception:
+            return None
+        try:
+            tk = yf.Ticker((symbol or "").strip().upper())
+        except Exception:
+            return None
+        eps_segments = []
+        financial_sources = (
+            ('quarterly_financials', 'quarterly'),
+            ('financials', 'annual'),
+        )
+        for attr, freq in financial_sources:
+            try:
+                financials = getattr(tk, attr, None)
+                eps_row = self._extract_eps_row(financials)
+            except Exception:
+                eps_row = None
+            if eps_row is None:
+                continue
+            idx = pd.to_datetime(eps_row.index)
+            idx = self._to_naive_datetime_index(idx)
+            segment = pd.Series(eps_row.values, index=idx).sort_index()
+            if freq == 'quarterly':
+                segment = segment.rolling(window=4, min_periods=4).sum().dropna()
+            if not segment.empty:
+                eps_segments.append(segment)
+        if not eps_segments:
+            return None
+        combined = pd.concat(eps_segments)
+        combined = combined[~combined.index.duplicated(keep='first')]
+        combined = combined.sort_index()
+        return combined
+
+    def _plot_signed_line(self, ax, x, y, label, pos_color='green', neg_color='red', linewidth=1.8):
+        import numpy as np
+        ys = pd.Series(pd.to_numeric(y, errors='coerce'))
+        xp = pd.Series(x)
+        y_pos = ys.where(ys > 0, np.nan)
+        y_neg = ys.where(ys <= 0, np.nan)
+        line_pos = None
+        line_neg = None
+        if not y_pos.isna().all():
+            line_pos, = ax.plot(xp, y_pos, linewidth=linewidth, color=pos_color, label=f"{label} (+)")
+        if not y_neg.isna().all():
+            line_neg, = ax.plot(xp, y_neg, linewidth=linewidth, color=neg_color, label=f"{label} (-)")
+        return line_pos, line_neg
+
+    def _plot_pe_eps_overlay(self, ax, df, time_col, target_col, symbol):
+        if ax is None or df is None or df.empty or not time_col:
+            return
+        try:
+            eps_series = self._compute_eps_series(symbol)
+        except Exception:
+            eps_series = None
+        if eps_series is None or eps_series.empty:
+            try:
+                self.status_var.set("P/E & EPS: no EPS series available")
+            except Exception:
+                pass
+            return
+        dfx = df.copy()
+        dfx[time_col] = pd.to_datetime(dfx[time_col], errors="coerce")
+        dfx = dfx.dropna(subset=[time_col])
+        dfx = dfx.sort_values(time_col)
+        candidates_close = [target_col, 'close', 'Close', 'Adj Close']
+        close_col = next((c for c in candidates_close if c and c in dfx.columns), None)
+        if close_col is None:
+            return
+        dfx['__EPS__'] = pd.Series(index=dfx.index, dtype=float)
+        for date, eps in eps_series.items():
+            try:
+                dfx.loc[dfx[time_col] >= pd.to_datetime(date), '__EPS__'] = float(eps)
+            except Exception:
+                continue
+        dfx['__EPS__'] = dfx['__EPS__'].ffill()
+        dfx['__PE__'] = pd.to_numeric(dfx[close_col], errors='coerce') / pd.to_numeric(dfx['__EPS__'], errors='coerce')
+        dfx = dfx.dropna(subset=['__PE__', '__EPS__'])
+        if dfx.empty:
+            return
+        x = dfx[time_col]
+        ax2 = ax.twinx()
+        pe_pos, pe_neg = self._plot_signed_line(ax2, x, dfx['__PE__'], 'P/E Ratio')
+        ax2.set_ylabel('P/E', color=(pe_pos.get_color() if pe_pos else (pe_neg.get_color() if pe_neg else '#1f77b4')))
+        ax2.tick_params(axis='y', labelcolor=(pe_pos.get_color() if pe_pos else (pe_neg.get_color() if pe_neg else '#1f77b4')))
+        ax3 = ax.twinx()
+        try:
+            ax3.spines['right'].set_position(('axes', 1.07))
+        except Exception:
+            pass
+        eps_pos, eps_neg = self._plot_signed_line(ax3, x, dfx['__EPS__'], 'EPS (TTM)', linewidth=1.6)
+        eps_lbl_color = (eps_pos.get_color() if eps_pos else (eps_neg.get_color() if eps_neg else '#2ca02c'))
+        ax3.set_ylabel('EPS', color=eps_lbl_color)
+        ax3.tick_params(axis='y', labelcolor=eps_lbl_color)
+        try:
+            latest_eps = dfx['__EPS__'].iloc[-1]
+            ann_color = ('green' if float(latest_eps) > 0 else 'red')
+            ax3.annotate(f'{latest_eps:.2f}', xy=(x.iloc[-1], latest_eps), xytext=(-10, 10), textcoords='offset points', ha='right', fontsize=9, color=ann_color)
+        except Exception:
+            pass
+        try:
+            h1, l1 = ax.get_legend_handles_labels()
+            h2, l2 = ax2.get_legend_handles_labels()
+            h3, l3 = ax3.get_legend_handles_labels()
+            ax.legend(h1 + h2 + h3, l1 + l2 + l3, loc='best')
+        except Exception:
+            pass
+        try:
+            if hasattr(self, 'canvas') and self.canvas:
+                self.canvas.draw()
+        except Exception:
+            pass
+
+    def _plot_pe_eps_two_panel(self, ax_pe, ax_eps, df, time_col, target_col, symbol):
+        if ax_pe is None or ax_eps is None or df is None or df.empty or not time_col:
+            return None, None
+        try:
+            eps_series = self._compute_eps_series(symbol)
+        except Exception:
+            eps_series = None
+        if eps_series is None or eps_series.empty:
+            try:
+                self.status_var.set("P/E & EPS: no EPS series available")
+            except Exception:
+                pass
+            return None, None
+        dfx = df.copy()
+        dfx[time_col] = pd.to_datetime(dfx[time_col], errors="coerce")
+        dfx = dfx.dropna(subset=[time_col])
+        dfx = dfx.sort_values(time_col)
+        candidates_close = [target_col, 'close', 'Close', 'Adj Close']
+        close_col = next((c for c in candidates_close if c and c in dfx.columns), None)
+        if close_col is None:
+            return None, None
+        dfx['__EPS__'] = pd.Series(index=dfx.index, dtype=float)
+        for date, eps in eps_series.items():
+            try:
+                dfx.loc[dfx[time_col] >= pd.to_datetime(date), '__EPS__'] = float(eps)
+            except Exception:
+                continue
+        dfx['__EPS__'] = dfx['__EPS__'].ffill()
+        dfx['__PE__'] = pd.to_numeric(dfx[close_col], errors='coerce') / pd.to_numeric(dfx['__EPS__'], errors='coerce')
+        dfx = dfx.dropna(subset=['__PE__', '__EPS__'])
+        if dfx.empty:
+            return None, None
+        x = dfx[time_col]
+        pe_pos, pe_neg = self._plot_signed_line(ax_pe, x, dfx['__PE__'], 'Trailing P/E Ratio', linewidth=2)
+        pe_lbl_color = (pe_pos.get_color() if pe_pos else (pe_neg.get_color() if pe_neg else '#1f77b4'))
+        ax_pe.set_ylabel('P/E Ratio', color=pe_lbl_color)
+        ax_pe.tick_params(axis='y', labelcolor=pe_lbl_color)
+        ax_pe.grid(True, alpha=0.3)
+        ax_price = ax_pe.twinx()
+        price_line, = ax_price.plot(x, dfx[close_col], linewidth=1.5, label='Close Price', color='#ff7f0e')
+        ax_price.set_ylabel('Close Price', color=price_line.get_color())
+        ax_price.tick_params(axis='y', labelcolor=price_line.get_color())
+        lines = [l for l in [pe_pos, pe_neg, price_line] if l is not None]
+        try:
+            ax_pe.legend(lines, [line.get_label() for line in lines], loc='upper left')
+        except Exception:
+            pass
+        try:
+            ax_pe.set_title(f'{symbol} PE & Price Over Time')
+        except Exception:
+            pass
+        eps_pos, eps_neg = self._plot_signed_line(ax_eps, x, dfx['__EPS__'], 'Annualized EPS (TTM)', linewidth=1.8)
+        ax_eps.set_ylabel('EPS (TTM)')
+        ax_eps.set_xlabel('Date')
+        ax_eps.grid(True, alpha=0.3)
+        try:
+            latest_eps = dfx['__EPS__'].iloc[-1]
+            ann_color = ('green' if float(latest_eps) > 0 else 'red')
+            ax_eps.annotate(f'Latest: {latest_eps:.2f}', xy=(x.iloc[-1], latest_eps), xytext=(-10, 10), textcoords='offset points', ha='right', fontsize=9, color=ann_color)
+        except Exception:
+            pass
+        try:
+            ax_eps.legend(loc='upper left')
+        except Exception:
+            pass
+        return dfx, close_col
 
     def _load_api_key(self) -> str:
         key = (os.getenv("NIXTLA_API_KEY", "") or "").strip()
@@ -702,8 +910,15 @@ class App:
             return
 
         self.clear_plot()
-        fig = Figure(figsize=(9, 5), dpi=100)
-        ax = fig.add_subplot(111)
+        if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+            from matplotlib.figure import Figure
+            fig = Figure(figsize=(12, 8), dpi=100)
+            gs = fig.add_gridspec(2, 1, height_ratios=[2.5, 1])
+            ax_pe = fig.add_subplot(gs[0])
+            ax_eps = fig.add_subplot(gs[1], sharex=ax_pe)
+        else:
+            fig = Figure(figsize=(9, 5), dpi=100)
+            ax = fig.add_subplot(111)
 
         # Prepare actual data
         act_df = self.df.copy()
@@ -733,12 +948,18 @@ class App:
              messagebox.showinfo("Info", "No data to display in the selected range")
              return
 
-        ax.plot(act_df[time_col], act_df[target_col], label="Actual", color="#1f77b4")
-
-        ax.legend(loc="best")
-        ax.set_title(f"Data Visualization: {self.series_id_var.get() if self.series_id_var.get() else 'All Series'}")
-        ax.set_xlabel(time_col)
-        ax.set_ylabel(target_col)
+        if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+            sym = self.symbol_var.get().strip()
+            if not sym and 'unique_id' in act_df.columns:
+                vals = [str(v).strip() for v in act_df['unique_id'].dropna().tolist() if str(v).strip()]
+                sym = vals[0] if vals else sym
+            dfx, close_col = self._plot_pe_eps_two_panel(ax_pe, ax_eps, act_df, time_col, (target_col if target_col in act_df.columns else 'close'), sym)
+        else:
+            ax.plot(act_df[time_col], act_df[target_col], label="Actual", color="#1f77b4")
+            ax.legend(loc="best")
+            ax.set_title(f"Data Visualization: {self.series_id_var.get() if self.series_id_var.get() else 'All Series'}")
+            ax.set_xlabel(time_col)
+            ax.set_ylabel(target_col)
 
         self.figure = fig
         self.canvas = FigureCanvasTkAgg(fig, master=self.plot_frame)
@@ -746,9 +967,13 @@ class App:
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         self.status_var.set("Data visualization complete")
         try:
-            x = act_df[time_col]
-            y = act_df[target_col]
-            self._setup_hover(ax, [(x, y, "Actual")])
+            if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                if dfx is not None and close_col is not None:
+                    self._setup_hover(ax_pe, [(pd.Series(dfx[time_col]), pd.Series(dfx[close_col]), "Actual")])
+            else:
+                x = act_df[time_col]
+                y = act_df[target_col]
+                self._setup_hover(ax, [(x, y, "Actual")])
         except Exception:
             pass
         self.last_act_df = act_df
@@ -756,14 +981,10 @@ class App:
         self.last_act_target = target_col
         try:
             if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()):
-                self._plot_moon_markers(
-                    ax,
-                    act_df,
-                    time_col,
-                    target_col,
-                    bool(self.show_full_moon_var.get()),
-                    bool(self.show_new_moon_var.get()),
-                )
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_moon_markers(ax_pe, act_df, time_col, (target_col if target_col in act_df.columns else 'close'), bool(self.show_full_moon_var.get()), bool(self.show_new_moon_var.get()))
+                else:
+                    self._plot_moon_markers(ax, act_df, time_col, target_col, bool(self.show_full_moon_var.get()), bool(self.show_new_moon_var.get()))
         except Exception:
             pass
         try:
@@ -772,17 +993,26 @@ class App:
                     print("Debug: visualizing earnings overlay", {"symbol": self.symbol_var.get().strip(), "rows": len(act_df)})
                 except Exception:
                     pass
-                self._plot_earnings_markers(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_earnings_markers(ax_pe, act_df, time_col, (target_col if target_col in act_df.columns else 'close'), self.symbol_var.get().strip())
+                else:
+                    self._plot_earnings_markers(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
         except Exception:
             pass
         try:
             if hasattr(self, 'show_insider_var') and bool(self.show_insider_var.get()):
-                self._plot_insider_sales(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_insider_sales(ax_pe, act_df, time_col, (target_col if target_col in act_df.columns else 'close'), self.symbol_var.get().strip())
+                else:
+                    self._plot_insider_sales(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
         except Exception:
             pass
         try:
             if hasattr(self, 'show_insider_proposed_var') and bool(self.show_insider_proposed_var.get()):
-                self._plot_insider_proposed_sales(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_insider_proposed_sales(ax_pe, act_df, time_col, (target_col if target_col in act_df.columns else 'close'), self.symbol_var.get().strip())
+                else:
+                    self._plot_insider_proposed_sales(ax, act_df, time_col, target_col, self.symbol_var.get().strip())
         except Exception:
             pass
         try:
@@ -791,7 +1021,10 @@ class App:
                     print("Debug: visualizing volume dot overlay", {"symbol": self.symbol_var.get().strip(), "rows": len(act_df)})
                 except Exception:
                     pass
-                self._plot_volume_dot_overlay(ax, act_df, time_col, (target_col if target_col in act_df.columns else 'close'))
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_volume_dot_overlay(ax_pe, act_df, time_col, (target_col if target_col in act_df.columns else 'close'))
+                else:
+                    self._plot_volume_dot_overlay(ax, act_df, time_col, (target_col if target_col in act_df.columns else 'close'))
                 try:
                     if hasattr(self, 'canvas') and self.canvas:
                         self.canvas.draw()
@@ -799,7 +1032,10 @@ class App:
                     pass
         except Exception:
             pass
-        self._render_markers(ax)
+        if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+            self._render_markers(ax_pe)
+        else:
+            self._render_markers(ax)
 
     def run_forecast(self):
         if self.df is None:
@@ -935,8 +1171,14 @@ class App:
             messagebox.showerror("Error", "matplotlib is required: " + str(e))
             return
         self.clear_plot()
-        fig = Figure(figsize=(9, 5), dpi=100)
-        ax = fig.add_subplot(111)
+        if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+            fig = Figure(figsize=(12, 8), dpi=100)
+            gs = fig.add_gridspec(2, 1, height_ratios=[2.5, 1])
+            ax_pe = fig.add_subplot(gs[0])
+            ax_eps = fig.add_subplot(gs[1], sharex=ax_pe)
+        else:
+            fig = Figure(figsize=(9, 5), dpi=100)
+            ax = fig.add_subplot(111)
         act_df = self.df.copy()
         act_df[time_col] = pd.to_datetime(act_df[time_col], errors="coerce")
         act_df[target_col] = pd.to_numeric(act_df[target_col], errors="coerce") if target_col in act_df.columns else act_df.get('close')
@@ -957,35 +1199,58 @@ class App:
             de = pd.to_datetime(disp_end, errors="coerce")
             if pd.notna(de):
                 act_ext = act_ext[act_ext[time_col] <= de]
-        # Plot actual close
-        if target_col in act_ext.columns:
-            ax.plot(act_ext[time_col], act_ext[target_col], label="Actual", color="#1f77b4")
-        elif 'close' in act_ext.columns:
-            ax.plot(act_ext[time_col], act_ext['close'], label="Actual", color="#1f77b4")
-        # Plot Kronos forecast close
-        y_time = fcst_df[time_col] if time_col in fcst_df.columns else pd.to_datetime(fcst_df.index)
-        if 'close' in fcst_df.columns:
-            ax.plot(y_time, fcst_df['close'], linestyle="-", color="#ff7f0e", label="Forecast (close)")
-        ax.legend(loc="best")
-        ax.set_title("Kronos Forecast")
-        ax.set_xlabel(time_col)
-        ax.set_ylabel(target_col or 'close')
+        if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+            sym = self.symbol_var.get().strip()
+            if not sym and 'unique_id' in act_ext.columns:
+                vals = [str(v).strip() for v in act_ext['unique_id'].dropna().tolist() if str(v).strip()]
+                sym = vals[0] if vals else sym
+            dfx, close_col = self._plot_pe_eps_two_panel(ax_pe, ax_eps, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), sym)
+            y_time = fcst_df[time_col] if time_col in fcst_df.columns else pd.to_datetime(fcst_df.index)
+            if 'close' in fcst_df.columns:
+                ax_pe.plot(y_time, fcst_df['close'], linestyle="-", color="#ff7f0e", label="Forecast (close)")
+            try:
+                handles, labels = ax_pe.get_legend_handles_labels()
+                ax_pe.legend(handles, labels, loc="best")
+            except Exception:
+                pass
+        else:
+            if target_col in act_ext.columns:
+                ax.plot(act_ext[time_col], act_ext[target_col], label="Actual", color="#1f77b4")
+            elif 'close' in act_ext.columns:
+                ax.plot(act_ext[time_col], act_ext['close'], label="Actual", color="#1f77b4")
+            y_time = fcst_df[time_col] if time_col in fcst_df.columns else pd.to_datetime(fcst_df.index)
+            if 'close' in fcst_df.columns:
+                ax.plot(y_time, fcst_df['close'], linestyle="-", color="#ff7f0e", label="Forecast (close)")
+            ax.legend(loc="best")
+            ax.set_title("Kronos Forecast")
+            ax.set_xlabel(time_col)
+            ax.set_ylabel(target_col or 'close')
         self.figure = fig
         self.canvas = FigureCanvasTkAgg(fig, master=self.plot_frame)
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
         try:
-            x1 = act_ext[time_col]
-            y1 = act_ext[target_col] if target_col in act_ext.columns else act_ext.get('close')
-            x2 = y_time
-            y2 = fcst_df['close'] if 'close' in fcst_df.columns else None
-            series = []
-            if x1 is not None and y1 is not None:
-                series.append((x1, y1, "Actual"))
-            if x2 is not None and y2 is not None:
-                series.append((pd.Series(x2), pd.Series(y2), "Forecast"))
-            if series:
-                self._setup_hover(ax, series)
+            if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                series = []
+                if dfx is not None and close_col is not None:
+                    series.append((pd.Series(dfx[time_col]), pd.Series(dfx[close_col]), "Actual"))
+                y2 = fcst_df['close'] if 'close' in fcst_df.columns else None
+                if y_time is not None and y2 is not None:
+                    series.append((pd.Series(y_time), pd.Series(y2), "Forecast"))
+                if series:
+                    self._setup_hover(ax_pe, series)
+            else:
+                x1 = act_ext[time_col]
+                y1 = act_ext[target_col] if target_col in act_ext.columns else act_ext.get('close')
+                x2 = y_time
+                y2 = fcst_df['close'] if 'close' in fcst_df.columns else None
+                series = []
+                if x1 is not None and y1 is not None:
+                    series.append((x1, y1, "Actual"))
+                if x2 is not None and y2 is not None:
+                    series.append((pd.Series(x2), pd.Series(y2), "Forecast"))
+                if series:
+                    self._setup_hover(ax, series)
         except Exception:
             pass
         self.last_act_df = act_ext
@@ -1009,17 +1274,26 @@ class App:
                     print("Debug: plotting earnings overlay on forecast view", {"symbol": self.symbol_var.get().strip(), "rows": len(act_ext)})
                 except Exception:
                     pass
-                self._plot_earnings_markers(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_earnings_markers(ax_pe, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+                else:
+                    self._plot_earnings_markers(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
         except Exception:
             pass
         try:
             if hasattr(self, 'show_insider_var') and bool(self.show_insider_var.get()):
-                self._plot_insider_sales(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_insider_sales(ax_pe, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+                else:
+                    self._plot_insider_sales(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
         except Exception:
             pass
         try:
             if hasattr(self, 'show_insider_proposed_var') and bool(self.show_insider_proposed_var.get()):
-                self._plot_insider_proposed_sales(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_insider_proposed_sales(ax_pe, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
+                else:
+                    self._plot_insider_proposed_sales(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'), self.symbol_var.get().strip())
         except Exception:
             pass
         try:
@@ -1028,10 +1302,16 @@ class App:
                     print("Debug: forecast volume dot overlay", {"symbol": self.symbol_var.get().strip(), "rows": len(act_ext)})
                 except Exception:
                     pass
-                self._plot_volume_dot_overlay(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'))
+                if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+                    self._plot_volume_dot_overlay(ax_pe, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'))
+                else:
+                    self._plot_volume_dot_overlay(ax, act_ext, time_col, (target_col if target_col in act_ext.columns else 'close'))
         except Exception:
             pass
-        self._render_markers(ax)
+        if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
+            self._render_markers(ax_pe)
+        else:
+            self._render_markers(ax)
 
     def _setup_hover(self, ax, series_list):
         import numpy as np
@@ -2269,6 +2549,7 @@ class App:
                 "insider_proposed": bool(self.show_insider_proposed_var.get()),
                 "insider_tooltips": bool(self.insider_tooltips_var.get()),
                 "volume_dot": bool(self.show_volume_dot_var.get()),
+                "pe_eps": bool(self.show_pe_eps_var.get()),
                 "full_moon": bool(self.show_full_moon_var.get()),
                 "new_moon": bool(self.show_new_moon_var.get()),
             })
