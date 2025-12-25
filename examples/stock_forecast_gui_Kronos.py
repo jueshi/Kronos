@@ -362,35 +362,138 @@ class App:
             return None
         return None
 
+    def _is_quarter_entry(self, form, frame, fp):
+        form = (form or "").upper()
+        frame = (frame or "").upper()
+        fp = (fp or "").upper()
+        if "Q" in frame:
+            return True
+        if form == "10-Q":
+            return True
+        if fp.startswith("Q"):
+            return True
+        return False
+
+    def _fetch_sec_eps_series(self, ticker):
+        try:
+            import sec_api_cache
+        except Exception:
+            return None
+        try:
+            cik = sec_api_cache.get_company_cik((ticker or "").strip().upper())
+        except Exception:
+            return None
+        if not cik:
+            return None
+        url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+        try:
+            data = sec_api_cache.make_sec_request(url, "company_facts")
+        except Exception:
+            data = None
+        if not isinstance(data, dict):
+            return None
+        facts = data.get("facts") or {}
+        candidates = [
+            ("us-gaap", "EarningsPerShareDiluted"),
+            ("us-gaap", "EarningsPerShareBasic"),
+            ("us-gaap", "DilutedEarningsPerShare"),
+            ("ifrs-full", "EarningsPerShareDiluted"),
+            ("ifrs-full", "EarningsPerShareBasic"),
+        ]
+        eps_fact = None
+        for taxonomy, concept in candidates:
+            taxonomy_bucket = facts.get(taxonomy)
+            if taxonomy_bucket and concept in taxonomy_bucket:
+                eps_fact = taxonomy_bucket[concept]
+                break
+        if eps_fact is None:
+            for taxonomy_bucket in facts.values():
+                if isinstance(taxonomy_bucket, dict):
+                    for concept in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+                        if concept in taxonomy_bucket:
+                            eps_fact = taxonomy_bucket[concept]
+                            break
+                if eps_fact:
+                    break
+        if eps_fact is None:
+            return None
+        units = eps_fact.get("units") or {}
+        quarterly_entries = []
+        annual_entries = []
+        for values in units.values():
+            for item in values:
+                val = item.get("val")
+                end = item.get("end") or item.get("filed")
+                if val is None or end is None:
+                    continue
+                try:
+                    dt = pd.Timestamp(end)
+                except Exception:
+                    continue
+                form = item.get("form")
+                frame = item.get("frame")
+                fp = item.get("fp")
+                if self._is_quarter_entry(form, frame, fp):
+                    quarterly_entries.append((dt, val))
+                else:
+                    annual_entries.append((dt, val))
+        segments = []
+        if quarterly_entries:
+            quarterly_entries.sort(key=lambda x: x[0])
+            q_idx = pd.DatetimeIndex([dt for dt, _ in quarterly_entries])
+            q_vals = [val for _, val in quarterly_entries]
+            q_series = pd.Series(q_vals, index=self._to_naive_datetime_index(q_idx))
+            q_series = q_series[~q_series.index.duplicated(keep='last')].sort_index()
+            q_ttm = q_series.rolling(window=4, min_periods=4).sum().dropna()
+            if not q_ttm.empty:
+                segments.append(q_ttm)
+        if annual_entries:
+            annual_entries.sort(key=lambda x: x[0])
+            a_idx = pd.DatetimeIndex([dt for dt, _ in annual_entries])
+            a_vals = [val for _, val in annual_entries]
+            a_series = pd.Series(a_vals, index=self._to_naive_datetime_index(a_idx))
+            a_series = a_series[~a_series.index.duplicated(keep='last')].sort_index()
+            if not a_series.empty:
+                segments.append(a_series)
+        if not segments:
+            return None
+        combined = pd.concat(segments)
+        combined = combined[~combined.index.duplicated(keep='first')]
+        return combined.sort_index()
+
     def _compute_eps_series(self, symbol):
+        eps_segments = []
+        try:
+            sec_eps = self._fetch_sec_eps_series(symbol)
+        except Exception:
+            sec_eps = None
+        if sec_eps is not None and not getattr(sec_eps, 'empty', True):
+            eps_segments.append(sec_eps)
         try:
             import yfinance as yf
-        except Exception:
-            return None
-        try:
             tk = yf.Ticker((symbol or "").strip().upper())
         except Exception:
-            return None
-        eps_segments = []
+            tk = None
         financial_sources = (
             ('quarterly_financials', 'quarterly'),
             ('financials', 'annual'),
         )
-        for attr, freq in financial_sources:
-            try:
-                financials = getattr(tk, attr, None)
-                eps_row = self._extract_eps_row(financials)
-            except Exception:
-                eps_row = None
-            if eps_row is None:
-                continue
-            idx = pd.to_datetime(eps_row.index)
-            idx = self._to_naive_datetime_index(idx)
-            segment = pd.Series(eps_row.values, index=idx).sort_index()
-            if freq == 'quarterly':
-                segment = segment.rolling(window=4, min_periods=4).sum().dropna()
-            if not segment.empty:
-                eps_segments.append(segment)
+        if tk is not None:
+            for attr, freq in financial_sources:
+                try:
+                    financials = getattr(tk, attr, None)
+                    eps_row = self._extract_eps_row(financials)
+                except Exception:
+                    eps_row = None
+                if eps_row is None:
+                    continue
+                idx = pd.to_datetime(eps_row.index)
+                idx = self._to_naive_datetime_index(idx)
+                segment = pd.Series(eps_row.values, index=idx).sort_index()
+                if freq == 'quarterly':
+                    segment = segment.rolling(window=4, min_periods=4).sum().dropna()
+                if not segment.empty:
+                    eps_segments.append(segment)
         if not eps_segments:
             return None
         combined = pd.concat(eps_segments)
