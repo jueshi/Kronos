@@ -374,20 +374,189 @@ class App:
             return True
         return False
 
-    def _fetch_sec_eps_series(self, ticker):
+    def _try_import_sec_api_cache(self):
+        import os, sys, importlib.util
+        home = os.path.expanduser("~")
+        # Prefer local module in examples
+        try:
+            here = os.path.join(os.path.dirname(__file__), "sec_api_cache.py")
+            if os.path.isfile(here):
+                spec = importlib.util.spec_from_file_location("sec_api_cache", here)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                return mod
+        except Exception:
+            pass
+        candidates = [
+            os.path.join(home, "OneDrive", "Documents", "stock_charts_10k10q"),
+            os.path.join(home, "OneDrive", "Documents", "github", "stock_charts_10k10q"),
+            os.path.join(home, "OneDrive", "Documents", "windsurf", "stock_charts_10k10q"),
+            os.path.join(home, "OneDrive", "Documents", "stock_charts_10k-10q0", "stock_charts_10k10q"),
+        ]
+        for base in candidates:
+            try:
+                p = os.path.join(base, "sec_api_cache.py")
+                if os.path.isfile(p):
+                    spec = importlib.util.spec_from_file_location("sec_api_cache", p)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    return mod
+            except Exception:
+                continue
         try:
             import sec_api_cache
+            return sec_api_cache
         except Exception:
+            pass
+        for p in candidates:
+            try:
+                if os.path.isdir(p) and p not in sys.path:
+                    sys.path.append(p)
+            except Exception:
+                continue
+        try:
+            import sec_api_cache
+            return sec_api_cache
+        except Exception:
+            return None
+
+    def _fetch_sec_eps_series(self, ticker):
+        def _seed_cik_cache(ticker):
+            try:
+                import shutil, os
+                from pathlib import Path
+                home = os.path.expanduser("~")
+                bases = [
+                    os.path.join(home, "OneDrive", "Documents", "stock_charts_10k10q"),
+                    os.path.join(home, "OneDrive", "Documents", "github", "stock_charts_10k10q"),
+                    os.path.join(home, "OneDrive", "Documents", "windsurf", "stock_charts_10k10q"),
+                    os.path.join(home, "OneDrive", "Documents", "stock_charts_10k-10q0", "stock_charts_10k10q"),
+                ]
+                src = None
+                for base in bases:
+                    candidate = os.path.join(base, "sec_cache", "cik_lookups", f"{(ticker or '').strip().upper()}.txt")
+                    if os.path.isfile(candidate):
+                        src = candidate
+                        break
+                if src:
+                    sec_api_cache = self._try_import_sec_api_cache()
+                    base_dir = Path(getattr(sec_api_cache, "CACHE_DIR", Path("sec_cache")))
+                    dst_dir = base_dir / "cik_lookups"
+                    dst_dir.mkdir(parents=True, exist_ok=True)
+                    dst = str(dst_dir / f"{(ticker or '').strip().upper()}.txt")
+                    shutil.copyfile(src, dst)
+                    try:
+                        print("Debug: seeded CIK cache from OneDrive", {"src": src, "dst": dst})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        _seed_cik_cache(ticker)
+        try:
+            import hashlib, json
+            from pathlib import Path
+            sec_api_cache = self._try_import_sec_api_cache()
+            base_dir = Path(getattr(sec_api_cache, "CACHE_DIR", Path("sec_cache")))
+            url = "https://www.sec.gov/files/company_tickers.json"
+            h = hashlib.md5(url.encode()).hexdigest()
+            p = base_dir / "company_tickers" / f"{h}.json"
+            dst_dir = base_dir / "cik_lookups"
+            if not (dst_dir / f"{(ticker or '').strip().upper()}.txt").exists() and p.exists():
+                with open(p, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                data = payload.get("data")
+                cik = None
+                if isinstance(data, dict):
+                    for _, company in data.items():
+                        if str(company.get("ticker", "")).upper() == (ticker or "").strip().upper():
+                            cik = str(company.get("cik_str")).zfill(10)
+                            break
+                elif isinstance(data, list):
+                    for rec in data:
+                        tk = str(rec.get("ticker", "")).upper()
+                        if tk == (ticker or "").strip().upper():
+                            cik = str(rec.get("cik_str")).zfill(10)
+                            break
+                if cik:
+                    try:
+                        dst_dir.mkdir(parents=True, exist_ok=True)
+                        with open(str(dst_dir / f"{(ticker or '').strip().upper()}.txt"), "w") as wf:
+                            wf.write(cik)
+                        print("Debug: seeded CIK from cached company_tickers", {"cik": cik})
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        mapping = {
+                            "AAPL": "0000320193",
+                            "AMD": "0000002488",
+                            "COST": "0000909832",
+                        }
+                        tk = (ticker or "").strip().upper()
+                        val = mapping.get(tk)
+                        if val and not (dst_dir / f"{tk}.txt").exists():
+                            dst_dir.mkdir(parents=True, exist_ok=True)
+                            with open(str(dst_dir / f"{tk}.txt"), "w") as wf:
+                                wf.write(val)
+                            print("Debug: seeded CIK from fallback mapping", {"ticker": tk, "cik": val})
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        sec_api_cache = self._try_import_sec_api_cache()
+        if sec_api_cache is None:
+            print("Debug: SEC EPS required; sec_api_cache not available")
             return None
         try:
-            cik = sec_api_cache.get_company_cik((ticker or "").strip().upper())
+            from pathlib import Path
+            home = os.path.expanduser("~")
+            bases = [
+                os.path.join(home, "OneDrive", "Documents", "windsurf", "stock_charts_10k10q"),
+                os.path.join(home, "OneDrive", "Documents", "stock_charts_10k10q"),
+                os.path.join(home, "OneDrive", "Documents", "github", "stock_charts_10k10q"),
+                os.path.join(home, "OneDrive", "Documents", "stock_charts_10k-10q0", "stock_charts_10k10q"),
+            ]
+            for base in bases:
+                sec_dir = os.path.join(base, "sec_cache")
+                if os.path.isdir(sec_dir):
+                    sec_api_cache.CACHE_DIR = Path(sec_dir)
+                    try:
+                        print("Debug: using external SEC cache dir", {"dir": sec_dir})
+                    except Exception:
+                        pass
+                    break
         except Exception:
-            return None
+            pass
+        try:
+            # Inject in-memory company tickers cache to bypass network if CIK file exists
+            from pathlib import Path
+            base_dir = Path(getattr(sec_api_cache, "CACHE_DIR"))
+            f = base_dir / "cik_lookups" / f"{(ticker or '').strip().upper()}.txt"
+            if f.exists():
+                with open(f, "r") as rf:
+                    cik_val = rf.read().strip()
+                if cik_val:
+                    sec_api_cache.company_tickers_cache = {
+                        "0": {"ticker": (ticker or "").strip().upper(), "cik_str": int(cik_val), "title": (ticker or "").strip().upper()}
+                    }
+                    from datetime import datetime as _dt
+                    sec_api_cache.company_tickers_last_update = _dt.now()
+                    print("Debug: injected in-memory company tickers cache", {"ticker": (ticker or '').strip().upper(), "cik": cik_val})
+        except Exception:
+            pass
+        cik = None
+        try:
+            cik = sec_api_cache.get_company_cik((ticker or "").strip().upper())
+            print("Debug: sec_api_cache CIK", {"symbol": (ticker or "").strip().upper(), "cik": cik})
+        except Exception:
+            cik = None
         if not cik:
             return None
         url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+        data = None
         try:
             data = sec_api_cache.make_sec_request(url, "company_facts")
+            print("Debug: SEC companyfacts fetched", {"symbol": (ticker or "").strip().upper(), "has_data": isinstance(data, dict)})
         except Exception:
             data = None
         if not isinstance(data, dict):
@@ -437,6 +606,10 @@ class App:
                     quarterly_entries.append((dt, val))
                 else:
                     annual_entries.append((dt, val))
+        try:
+            print("Debug: SEC EPS entries", {"quarterly": len(quarterly_entries), "annual": len(annual_entries)})
+        except Exception:
+            pass
         segments = []
         if quarterly_entries:
             quarterly_entries.sort(key=lambda x: x[0])
@@ -455,6 +628,15 @@ class App:
             a_series = a_series[~a_series.index.duplicated(keep='last')].sort_index()
             if not a_series.empty:
                 segments.append(a_series)
+            try:
+                print("Debug: SEC annual EPS series", {"points": int(len(a_series)), "start": str(a_series.index.min()), "end": str(a_series.index.max())})
+            except Exception:
+                pass
+        else:
+            try:
+                print("Debug: SEC annual EPS series", {"points": 0})
+            except Exception:
+                pass
         if not segments:
             return None
         combined = pd.concat(segments)
@@ -463,42 +645,22 @@ class App:
 
     def _compute_eps_series(self, symbol):
         eps_segments = []
+        sec_eps = None
         try:
             sec_eps = self._fetch_sec_eps_series(symbol)
         except Exception:
             sec_eps = None
-        if sec_eps is not None and not getattr(sec_eps, 'empty', True):
-            eps_segments.append(sec_eps)
-        try:
-            import yfinance as yf
-            tk = yf.Ticker((symbol or "").strip().upper())
-        except Exception:
-            tk = None
-        financial_sources = (
-            ('quarterly_financials', 'quarterly'),
-            ('financials', 'annual'),
-        )
-        if tk is not None:
-            for attr, freq in financial_sources:
-                try:
-                    financials = getattr(tk, attr, None)
-                    eps_row = self._extract_eps_row(financials)
-                except Exception:
-                    eps_row = None
-                if eps_row is None:
-                    continue
-                idx = pd.to_datetime(eps_row.index)
-                idx = self._to_naive_datetime_index(idx)
-                segment = pd.Series(eps_row.values, index=idx).sort_index()
-                if freq == 'quarterly':
-                    segment = segment.rolling(window=4, min_periods=4).sum().dropna()
-                if not segment.empty:
-                    eps_segments.append(segment)
-        if not eps_segments:
+        if sec_eps is None or getattr(sec_eps, 'empty', True):
+            print("Debug: SEC EPS required; skipping yfinance-only fallback")
             return None
+        eps_segments.append(sec_eps)
         combined = pd.concat(eps_segments)
         combined = combined[~combined.index.duplicated(keep='first')]
         combined = combined.sort_index()
+        try:
+            print("Debug: EPS series merged", {"total_points": int(len(combined)), "start": str(combined.index.min()), "end": str(combined.index.max())})
+        except Exception:
+            pass
         return combined
 
     def _plot_signed_line(self, ax, x, y, label, pos_color='green', neg_color='red', linewidth=1.8):
@@ -612,6 +774,12 @@ class App:
         dfx = dfx.dropna(subset=['__PE__', '__EPS__'])
         if dfx.empty:
             return None, None
+        try:
+            first_idx = dfx['__EPS__'].first_valid_index()
+            first_dt = dfx.loc[first_idx, time_col] if first_idx is not None else None
+            print("Debug: overlay EPS mapping", {"first_eps_date": str(pd.to_datetime(first_dt)) if first_dt is not None else None, "mapped_points": int(len(dfx.dropna(subset=['__EPS__'])))})
+        except Exception:
+            pass
         x = dfx[time_col]
         pe_pos, pe_neg = self._plot_signed_line(ax_pe, x, dfx['__PE__'], 'Trailing P/E Ratio', linewidth=2)
         pe_lbl_color = (pe_pos.get_color() if pe_pos else (pe_neg.get_color() if pe_neg else '#1f77b4'))
