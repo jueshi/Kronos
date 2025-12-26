@@ -103,8 +103,10 @@ class App:
         self.top_p_var = tk.DoubleVar(value=0.9)
         self.top_k_var = tk.IntVar(value=0)
         self.sample_count_var = tk.IntVar(value=3)
-        self.show_full_moon_var = tk.BooleanVar(value=False)
-        self.show_new_moon_var = tk.BooleanVar(value=False)
+        self.show_full_moon_var = tk.BooleanVar(value=True)
+        self.show_new_moon_var = tk.BooleanVar(value=True)
+        self.show_first_quarter_moon_var = tk.BooleanVar(value=True)
+        self.show_last_quarter_moon_var = tk.BooleanVar(value=True)
         self.marker_mode_var = tk.BooleanVar(value=False)
         self.marker_text_var = tk.StringVar(value="")
         self.marker_series_var = tk.StringVar(value="Actual")
@@ -272,6 +274,10 @@ class App:
         self.full_moon_cb.grid(row=0, column=1, sticky=tk.W)
         self.new_moon_cb = ttk.Checkbutton(g1, text="Show New Moon", variable=self.show_new_moon_var)
         self.new_moon_cb.grid(row=0, column=2, sticky=tk.W)
+        self.first_quarter_cb = ttk.Checkbutton(g1, text="Show 1st Quarter", variable=self.show_first_quarter_moon_var)
+        self.first_quarter_cb.grid(row=0, column=9, sticky=tk.W)
+        self.last_quarter_cb = ttk.Checkbutton(g1, text="Show Last Quarter", variable=self.show_last_quarter_moon_var)
+        self.last_quarter_cb.grid(row=0, column=10, sticky=tk.W)
         self.earnings_cb = ttk.Checkbutton(g1, text="Show Earnings", variable=self.show_earnings_var, command=self._on_overlay_toggle)
         self.earnings_cb.grid(row=0, column=3, sticky=tk.W)
         self.insider_cb = ttk.Checkbutton(g1, text="Show Insider Sales", variable=self.show_insider_var, command=self._on_overlay_toggle)
@@ -330,6 +336,11 @@ class App:
         self.add_tooltip(self.impute_method_cb, "Choose ffill/bfill/ffill_bfill/interpolate for imputation.")
         self.add_tooltip(self.full_moon_cb, "Mark full moon dates; if non-trading, use previous trading day.")
         self.add_tooltip(self.new_moon_cb, "Mark new moon dates; if non-trading, use previous trading day.")
+        try:
+            self.add_tooltip(self.first_quarter_cb, "Mark first quarter moon dates; adjusts to previous trading day.")
+            self.add_tooltip(self.last_quarter_cb, "Mark last quarter moon dates; adjusts to previous trading day.")
+        except Exception:
+            pass
         self.add_tooltip(self.earnings_cb, "Mark company earnings release dates using the selected symbol.")
         self.add_tooltip(self.insider_cb, "Plot historical insider sale transactions; bubble size reflects transaction value.")
         self.add_tooltip(self.insider_proposed_cb, "Show proposed future insider sales as red dashed v-lines.")
@@ -1251,11 +1262,11 @@ class App:
         self.last_act_time_col = time_col
         self.last_act_target = target_col
         try:
-            if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()):
+            if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()) or bool(self.show_first_quarter_moon_var.get()) or bool(self.show_last_quarter_moon_var.get()):
                 if hasattr(self, 'show_pe_eps_var') and bool(self.show_pe_eps_var.get()):
-                    self._plot_moon_markers(ax_pe, act_df, time_col, (target_col if target_col in act_df.columns else 'close'), bool(self.show_full_moon_var.get()), bool(self.show_new_moon_var.get()))
+                    self._plot_moon_markers(ax_pe, act_df, time_col, (target_col if target_col in act_df.columns else 'close'), bool(self.show_full_moon_var.get()), bool(self.show_new_moon_var.get()), bool(self.show_first_quarter_moon_var.get()), bool(self.show_last_quarter_moon_var.get()))
                 else:
-                    self._plot_moon_markers(ax, act_df, time_col, target_col, bool(self.show_full_moon_var.get()), bool(self.show_new_moon_var.get()))
+                    self._plot_moon_markers(ax, act_df, time_col, target_col, bool(self.show_full_moon_var.get()), bool(self.show_new_moon_var.get()), bool(self.show_first_quarter_moon_var.get()), bool(self.show_last_quarter_moon_var.get()))
         except Exception:
             pass
         try:
@@ -1528,7 +1539,7 @@ class App:
         self.last_act_time_col = time_col
         self.last_act_target = target_col if target_col in act_ext.columns else 'close'
         try:
-            if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()):
+            if bool(self.show_full_moon_var.get()) or bool(self.show_new_moon_var.get()) or bool(self.show_first_quarter_moon_var.get()) or bool(self.show_last_quarter_moon_var.get()):
                 self._plot_moon_markers(
                     ax,
                     act_ext,
@@ -1536,6 +1547,8 @@ class App:
                     target_col if target_col in act_ext.columns else 'close',
                     bool(self.show_full_moon_var.get()),
                     bool(self.show_new_moon_var.get()),
+                    bool(self.show_first_quarter_moon_var.get()),
+                    bool(self.show_last_quarter_moon_var.get()),
                 )
         except Exception:
             pass
@@ -1898,6 +1911,8 @@ class App:
         import datetime as _dt
         fulls = []
         news = []
+        firsts = []
+        lasts = []
         cur = start_ts.to_pydatetime() if hasattr(start_ts, 'to_pydatetime') else _dt.datetime.fromtimestamp(pd.to_datetime(start_ts).timestamp())
         end_py = end_ts.to_pydatetime() if hasattr(end_ts, 'to_pydatetime') else _dt.datetime.fromtimestamp(pd.to_datetime(end_ts).timestamp())
         f = ephem.next_full_moon(cur)
@@ -1908,15 +1923,29 @@ class App:
         while n.datetime() <= end_py:
             news.append(pd.to_datetime(n.datetime()))
             n = ephem.next_new_moon(n)
-        return fulls, news
+        try:
+            q1 = ephem.next_first_quarter_moon(cur)
+            while q1.datetime() <= end_py:
+                firsts.append(pd.to_datetime(q1.datetime()))
+                q1 = ephem.next_first_quarter_moon(q1)
+        except Exception:
+            pass
+        try:
+            q3 = ephem.next_last_quarter_moon(cur)
+            while q3.datetime() <= end_py:
+                lasts.append(pd.to_datetime(q3.datetime()))
+                q3 = ephem.next_last_quarter_moon(q3)
+        except Exception:
+            pass
+        return fulls, news, firsts, lasts
 
-    def _plot_moon_markers(self, ax, df, time_col, target_col, show_full, show_new):
+    def _plot_moon_markers(self, ax, df, time_col, target_col, show_full, show_new, show_first, show_last):
         if df is None or df.empty:
             return
         idx = pd.DatetimeIndex(pd.to_datetime(df[time_col]).dropna().sort_values())
         start = idx.min()
         end = idx.max()
-        fulls, news = self._compute_moon_dates(start, end)
+        fulls, news, firsts, lasts = self._compute_moon_dates(start, end)
         def adjust(dt):
             ts = pd.to_datetime(dt)
             i = idx.get_indexer([ts], method='pad')
@@ -1927,6 +1956,10 @@ class App:
         ys_f = []
         xs_n = []
         ys_n = []
+        xs_q1 = []
+        ys_q1 = []
+        xs_q3 = []
+        ys_q3 = []
         # Build a mapping Series for fast y lookup
         df_map = df.copy()
         df_map[time_col] = pd.to_datetime(df_map[time_col])
@@ -1947,10 +1980,96 @@ class App:
                     ys_n.append(df_map.loc[df_map[time_col] == a, target_col].iloc[0])
                 except Exception:
                     continue
+        for d in firsts:
+            a = adjust(d)
+            if a is not None:
+                xs_q1.append(a)
+                try:
+                    ys_q1.append(df_map.loc[df_map[time_col] == a, target_col].iloc[0])
+                except Exception:
+                    continue
+        for d in lasts:
+            a = adjust(d)
+            if a is not None:
+                xs_q3.append(a)
+                try:
+                    ys_q3.append(df_map.loc[df_map[time_col] == a, target_col].iloc[0])
+                except Exception:
+                    continue
         if show_full and xs_f:
             ax.scatter(xs_f, ys_f, s=30, color="#d62728", label="Full Moon")
         if show_new and xs_n:
             ax.scatter(xs_n, ys_n, s=30, color="#9467bd", label="New Moon")
+        if show_first and xs_q1:
+            ax.scatter(xs_q1, ys_q1, s=30, color="#ff69b4", marker="^", label="1st Quarter")
+        if show_last and xs_q3:
+            ax.scatter(xs_q3, ys_q3, s=30, color="#ffd700", marker="s", label="Last Quarter")
+        try:
+            import ephem
+            import datetime as _dt
+            now_py = _dt.datetime.utcnow()
+            end_py = end.to_pydatetime() if hasattr(end, "to_pydatetime") else _dt.datetime.fromtimestamp(pd.to_datetime(end).timestamp())
+            labels_done = set()
+            future_events = []
+            if show_full:
+                dt = ephem.next_full_moon(now_py)
+                while dt.datetime() <= end_py:
+                    a = adjust(pd.to_datetime(dt.datetime()))
+                    if a is not None:
+                        lbl = "Next Full Moon" if "full" not in labels_done else None
+                        ax.axvline(x=a, color="#d62728", alpha=0.35, linestyle="--", label=lbl)
+                        labels_done.add("full")
+                    dt = ephem.next_full_moon(dt)
+                if dt.datetime() > end_py:
+                    future_events.append(("Next Full Moon", pd.to_datetime(dt.datetime()), "#d62728", "full"))
+            if show_new:
+                dt = ephem.next_new_moon(now_py)
+                while dt.datetime() <= end_py:
+                    a = adjust(pd.to_datetime(dt.datetime()))
+                    if a is not None:
+                        lbl = "Next New Moon" if "new" not in labels_done else None
+                        ax.axvline(x=a, color="#9467bd", alpha=0.35, linestyle="--", label=lbl)
+                        labels_done.add("new")
+                    dt = ephem.next_new_moon(dt)
+                if dt.datetime() > end_py:
+                    future_events.append(("Next New Moon", pd.to_datetime(dt.datetime()), "#9467bd", "new"))
+            if show_first:
+                dt = ephem.next_first_quarter_moon(now_py)
+                while dt.datetime() <= end_py:
+                    a = adjust(pd.to_datetime(dt.datetime()))
+                    if a is not None:
+                        lbl = "Next 1st Quarter" if "q1" not in labels_done else None
+                        ax.axvline(x=a, color="#ff69b4", alpha=0.35, linestyle="--", label=lbl)
+                        labels_done.add("q1")
+                    dt = ephem.next_first_quarter_moon(dt)
+                if dt.datetime() > end_py:
+                    future_events.append(("Next 1st Quarter", pd.to_datetime(dt.datetime()), "#ff69b4", "q1"))
+            if show_last:
+                dt = ephem.next_last_quarter_moon(now_py)
+                while dt.datetime() <= end_py:
+                    a = adjust(pd.to_datetime(dt.datetime()))
+                    if a is not None:
+                        lbl = "Next Last Quarter" if "q3" not in labels_done else None
+                        ax.axvline(x=a, color="#ffd700", alpha=0.35, linestyle="--", label=lbl)
+                        labels_done.add("q3")
+                    dt = ephem.next_last_quarter_moon(dt)
+                if dt.datetime() > end_py:
+                    future_events.append(("Next Last Quarter", pd.to_datetime(dt.datetime()), "#ffd700", "q3"))
+            if future_events:
+                try:
+                    new_right = max(ev[1] for ev in future_events)
+                    ax.set_xlim(right=new_right)
+                except Exception:
+                    pass
+                for lbl, xline, col, key in future_events:
+                    try:
+                        l = lbl if key not in labels_done else None
+                        ax.axvline(x=xline, color=col, alpha=0.35, linestyle="--", label=l)
+                        labels_done.add(key)
+                    except Exception:
+                        continue
+        except Exception:
+            pass
         handles, labels = ax.get_legend_handles_labels()
         ax.legend(handles, labels, loc="best")
 
@@ -2823,6 +2942,8 @@ class App:
                 "pe_eps": bool(self.show_pe_eps_var.get()),
                 "full_moon": bool(self.show_full_moon_var.get()),
                 "new_moon": bool(self.show_new_moon_var.get()),
+                "first_quarter": bool(self.show_first_quarter_moon_var.get()),
+                "last_quarter": bool(self.show_last_quarter_moon_var.get()),
             })
         except Exception:
             pass
@@ -3685,6 +3806,8 @@ if __name__ == "__main__":
                 "insider_tooltips": bool(self.insider_tooltips_var.get()),
                 "full_moon": bool(self.show_full_moon_var.get()),
                 "new_moon": bool(self.show_new_moon_var.get()),
+                "first_quarter": bool(self.show_first_quarter_moon_var.get()),
+                "last_quarter": bool(self.show_last_quarter_moon_var.get()),
             })
         except Exception:
             pass

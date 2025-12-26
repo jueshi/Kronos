@@ -443,5 +443,5 @@ def plot_pe(df, ticker):
 
 # 使用示例
 if __name__ == "__main__":
-    ticker = "aapl"  # 替换为你的目标股票，如 "ALAB" 或 "AMD"
+    ticker = "nvda"  # 替换为你的目标股票，如 "ALAB" 或 "AMD"
     plot_pe_ratio_over_time(ticker, period='max')
